@@ -127,8 +127,8 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         throw RequestError.invalidParams("Unsupported session configuration option");
       }
       const session = entry.session;
-      const model = session.modelRuntime?.getModels().find((candidate) => `${candidate.provider}/${candidate.id}` === params.value);
-      if (!model || !session.setModel) throw RequestError.invalidParams("Unknown model");
+      const model = session.modelRuntime?.getAvailableSnapshot().find((candidate) => `${candidate.provider}/${candidate.id}` === params.value);
+      if (!model || !session.setModel) throw RequestError.invalidParams("Unknown or unavailable model");
       entry.changingModel = true;
       try {
         await session.setModel(model);

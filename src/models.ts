@@ -4,12 +4,12 @@ import type { BridgeSession } from "./sessions.js";
 
 export function modelConfigOptions(session: BridgeSession): SessionConfigOption[] {
   if (!session.model || !session.modelRuntime || !session.setModel) return [];
-  const models = new Map(session.modelRuntime.getModels().map((model) => [`${model.provider}/${model.id}`, model]));
+  const models = session.modelRuntime.getAvailableSnapshot();
   const currentValue = `${session.model.provider}/${session.model.id}`;
-  models.set(currentValue, session.model);
+  if (!models.some((model) => `${model.provider}/${model.id}` === currentValue)) return [];
   return [{
     id: "model", name: "Model", category: "model", type: "select", currentValue,
-    options: [...models].map(([value, model]) => ({ value, name: `${model.name} (${model.provider})` })),
+    options: models.map((model) => ({ value: `${model.provider}/${model.id}`, name: `${model.name} (${model.provider})` })),
   }];
 }
 

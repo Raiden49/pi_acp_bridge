@@ -20,7 +20,7 @@ node dist/index.js
 
 构建输出为压缩后的单文件 ESM bundle `dist/index.js`，带 CLI shebang，无需相邻 `node_modules` 即可启动，可通过 `node /absolute/path/to/dist/index.js` 启动。标准输出仅用于 ACP 消息，不用于日志。
 
-模型发现默认读取 `~/.pi/agent/models.json`，也支持 Pi 的 `PI_CODING_AGENT_DIR`。无需凭据或模型 API 请求即可完成初始化。初始化模型列表通过 `_meta["pi-acp-bridge/models"]` 扩展返回；创建及恢复会话通过标准 `configOptions` 提供 IDE 原生模型下拉框，使用 `session/set_config_option` 在空闲时切换当前会话模型。目录不按凭据过滤，选择模型仍需要有效的 Pi 凭据。
+模型发现默认读取 `~/.pi/agent/models.json`，也支持 Pi 的 `PI_CODING_AGENT_DIR`。无需凭据或模型 API 请求即可完成初始化。初始化模型列表通过 `_meta["pi-acp-bridge/models"]` 扩展返回；创建及恢复会话通过标准 `configOptions` 提供 IDE 原生模型下拉框，使用 `session/set_config_option` 在空闲时切换当前会话模型。IDE 下拉框只展示 Pi 已配置认证的可用模型；初始化扩展仍是完整的已知模型目录，不用于填充下拉框。
 
 会话使用 Pi 的独立 JSONL 历史，ACP ID 与文件路径保存在 `~/.pi/agent/acp-sessions.json`（遵循 `PI_CODING_AGENT_DIR`）。关闭或断开后，可以用原 ID 和相同 `cwd` 调用 `session/load` 恢复；请先关闭旧客户端，避免多个进程同时写入同一 JSONL。
 

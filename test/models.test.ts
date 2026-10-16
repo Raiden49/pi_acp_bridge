@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test } from "vitest";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
@@ -7,6 +7,9 @@ import { protocolHarness } from "./protocol-harness.js";
 test("native model selector switches the model used by the next prompt without changing other sessions", async () => {
   await mkdir(".scratch", { recursive: true });
   const cwd = await mkdtemp(resolve(".scratch/models-"));
+  await writeFile(resolve(cwd, "models.json"), JSON.stringify({ providers: {
+    "unconfigured-bridge-test": { baseUrl: "https://example.invalid/v1", api: "openai-completions", models: [{ id: "hidden" }] },
+  } }));
   const runtime = await ModelRuntime.create({
     modelsPath: resolve(cwd, "models.json"), refreshOnCreate: false, allowModelNetwork: false,
     credentials: {
@@ -50,6 +53,7 @@ test("native model selector switches the model used by the next prompt without c
       id: "model", category: "model", type: "select", currentValue: ids[0],
       options: expect.arrayContaining([expect.objectContaining({ value: ids[1] })]),
     }));
+    expect(a.configOptions[0].options).not.toContainEqual(expect.objectContaining({ value: "unconfigured-bridge-test/hidden" }));
     const b = (await client.request("session/new", { cwd, mcpServers: [] })).result;
     await client.nextNotification();
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "model", value: ids[1] }))
@@ -59,6 +63,8 @@ test("native model selector switches the model used by the next prompt without c
         .toMatchObject({ result: { stopReason: "end_turn" } });
       expect((await client.nextNotification()).params.update.content.text).toBe(expected);
     }
+    expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "model", value: "unconfigured-bridge-test/hidden" }))
+      .toMatchObject({ error: { code: -32602 } });
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "model", value: "missing/model" }))
       .toMatchObject({ error: { code: -32602 } });
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "unknown", value: ids[0] }))
