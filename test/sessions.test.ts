@@ -38,17 +38,54 @@ test("routes concurrent workspace sessions, streams before completion, and relea
   expect(sessions[0]!.dispose).toHaveBeenCalledOnce();
 });
 
-test("cancel stops an active prompt without closing the session", async () => {
+test("streams thinking separately from assistant text in emission order", async () => {
   const session = fakeSession("/workspace/a");
   const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => session });
   try {
     const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
     const prompt = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] });
     await client.nextNotification();
+    session.emit("thinking_delta", "Consider ");
+    session.emit("thinking_delta", "the question.");
+    session.emit("text_delta", "The answer.");
+    session.finish();
+    expect(await prompt).toMatchObject({ result: { stopReason: "end_turn" } });
+    const updates = await Promise.all(Array.from({ length: 3 }, () => client.nextNotification()));
+    expect(updates.map((message) => message.params)).toEqual([
+      { sessionId, update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Consider " } } },
+      { sessionId, update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "the question." } } },
+      { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The answer." } } },
+    ]);
+  } finally { await client.close(); }
+});
+
+test.each([false, true])("cancel preserves chunks and allows retry when Pi rejects on abort: %s", async (rejectOnAbort) => {
+  const session = fakeSession("/workspace/a");
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => session });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
+    const prompt = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] });
+    expect((await client.nextNotification()).params.update.content.text).toBe("/workspace/a:hello");
+    session.emit("thinking_delta", "Partial reasoning");
+    expect((await client.nextNotification()).params.update).toEqual({
+      sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Partial reasoning" },
+    });
+    session.abort.mockImplementationOnce(async () => {
+      session.emit("thinking_delta", "Late thought");
+      session.emit("text_delta", "Late answer");
+      session.finish(rejectOnAbort ? new Error("Provider aborted") : undefined);
+    });
     client.notify("session/cancel", { sessionId });
     expect(await prompt).toMatchObject({ result: { stopReason: "cancelled" } });
+    expect(session.abort).toHaveBeenCalledOnce();
     expect(session.dispose).not.toHaveBeenCalled();
     expect(session.listeners.size).toBe(0);
+    const retry = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "retry" }] });
+    expect((await client.nextNotification()).params.update).toEqual({
+      sessionUpdate: "agent_message_chunk", content: { type: "text", text: "/workspace/a:retry" },
+    });
+    session.finish();
+    expect(await retry).toMatchObject({ result: { stopReason: "end_turn" } });
   } finally { await client.close(); }
 });
 
@@ -100,16 +137,22 @@ test("rejects unsupported inputs before invoking Pi", async () => {
 
 function fakeSession(cwd: string) {
   const listeners = new Set<Parameters<AgentSession["subscribe"]>[0]>();
-  let finish = () => {};
+  let finish = (_error?: Error) => {};
   return {
     listeners,
-    finish: () => finish(),
+    finish: (error?: Error) => finish(error),
+    emit(type: "text_delta" | "thinking_delta", delta: string) {
+      const event = { type: "message_update", assistantMessageEvent: { type, delta } };
+      for (const listener of listeners) listener(event as Parameters<typeof listener>[0]);
+    },
     subscribe(listener: Parameters<AgentSession["subscribe"]>[0]) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
     async prompt(text: string) {
-      const done = new Promise<void>((resolve) => { finish = resolve; });
+      const done = new Promise<void>((resolve, reject) => {
+        finish = (error) => error ? reject(error) : resolve();
+      });
       // Only the event envelope used by the bridge is needed at this boundary.
       const event = { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `${cwd}:${text}` } };
       for (const listener of listeners) listener(event as Parameters<typeof listener>[0]);

@@ -38,9 +38,9 @@
 - `session/new` 要求 `cwd` 为现有目录的绝对路径，返回独立随机 `sessionId`。每次调用 `createAgentSession({ cwd, sessionManager: SessionManager.inMemory(cwd) })`，由 Pi 在该目录发现项目设置、上下文及工具路径。不调用 `process.chdir()`，不共享会话历史。模型与凭据遵循 Pi 的常规配置。
 - `cwd` 提供上下文及相对路径隔离，**不是文件系统安全沙箱**：绝对路径、`..`、bash 及扩展仍可能访问其他目录。仅应对可信工作区使用。工作区扩展仍遵循 Pi 的资源加载与信任规则。
 - 仅支持单工作区、文本提示。非空 `mcpServers`、额外目录及非文本内容返回 `-32602`，不静默忽略。文本块按顺序以换行拼接。未配置可用模型/凭据时，会话可以创建，但提示会失败。
-- `session/prompt` 在调用 Pi 前订阅事件，将 `message_update` / `text_delta` 映射为 `session/update` 中的 `agent_message_chunk`，内容为 `{ type: "text", text: delta }`。通知实时发送，按序排空后才返回提示结果。不转发思考、工具调用或其他 Pi 事件。
+- `session/prompt` 在调用 Pi 前订阅事件，将 `message_update` / `text_delta` 映射为 `session/update` 中的 `agent_message_chunk`，将 `thinking_delta` 单独映射为 `agent_thought_chunk`，均使用 `{ type: "text", text: delta }`。思考不混入回复正文，客户端可将其渲染为可折叠区块。两类通知共用有序发送队列，按序排空后才返回提示结果。不转发工具调用或其他 Pi 事件。
 - 不同会话可以并发；同一会话已有活动提示时返回 `-32600`，不隐式排队。正常结束返回 `end_turn`，长度截断返回 `max_tokens`，取消返回 `cancelled`。Pi 推理错误返回不含原始提供商细节的 `-32603`。
-- `session/cancel` 调用 Pi `abort()`，保留会话供后续提示使用。提示成功、失败或取消后均移除桥接订阅。
+- `session/cancel` 立即调用 Pi `abort()`，活动提示结算为 `cancelled`；即使 Pi 的提示 Promise 因中止而拒绝，也不返回推理错误。已发送的文本和思考片段不撤回，不清空 Pi 历史；取消后不再发送该提示的排队或新增片段。保留会话供后续提示使用，提示成功、失败或取消后均移除桥接订阅。
 - `session/close` 从会话表删除会话、阻止后续通知、取消活动提示并调用 `session.dispose()`。连接断开时释放所有会话；创建过程中断开连接时，创建完成后立即释放。未知或已关闭的会话返回 `-32602`。没有会话恢复或持久化保证。
 
 ## 测试边界
@@ -49,7 +49,7 @@
 
 `test/initialize.test.ts` 覆盖握手、版本协商、无文件回退、自定义模型、重新发现、配置错误、密钥不泄漏与未实现认证的明确拒绝。
 
-`test/sessions.test.ts` 在会话工厂边界注入可控会话，经过 NDJSON 验证并发路由、流通知先于提示完成、同会话并发拒绝、取消、关闭、断线、订阅释放及失败后重试。
+`test/sessions.test.ts` 在会话工厂边界注入可控会话，经过 NDJSON 验证并发路由、文本与思考流分离及顺序、流通知先于提示完成、同会话并发拒绝、取消时调用 abort、取消后的片段抑制与会话复用（包括 Pi 中止时拒绝的情况）、关闭、断线、订阅释放及失败后重试。
 
 `test/workspace-isolation.test.ts` 使用真实 Pi `AgentSession`、项目资源发现及 `read` 工具，仅替换模型流为确定性的内存响应。经过 ACP 并发请求验证工作区指令、相对文件读取和对话内容隔离，不请求真实模型、不使用个人凭据。
 

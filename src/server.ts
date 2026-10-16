@@ -84,12 +84,16 @@ export function startServer({ input, output, modelsPath, createSession = createW
       try {
         active.unsubscribe = entry.session.subscribe((event) => {
           if (active.cancelled) return;
-          if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+          if (event.type === "message_update" && (
+            event.assistantMessageEvent.type === "text_delta" || event.assistantMessageEvent.type === "thinking_delta"
+          )) {
+            const sessionUpdate = event.assistantMessageEvent.type === "thinking_delta"
+              ? "agent_thought_chunk" as const : "agent_message_chunk" as const;
             const text = event.assistantMessageEvent.delta;
             updates = updates.then(async () => {
               if (active.cancelled) return;
               await client.sessionUpdate({ sessionId: params.sessionId, update: {
-                sessionUpdate: "agent_message_chunk", content: { type: "text", text },
+                sessionUpdate, content: { type: "text", text },
               } });
             }).catch(() => { deliveryFailed = true; });
           }
