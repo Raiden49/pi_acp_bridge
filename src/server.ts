@@ -3,13 +3,14 @@ import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { decodePrompt, imageLink } from "./content.js";
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
-import type { InitializeResponse, StopReason } from "@agentclientprotocol/sdk";
+import type { InitializeResponse, StopReason, McpServer } from "@agentclientprotocol/sdk";
 import { discoverModels, modelConfigOptions } from "./models.js";
 import { createToolUpdates } from "./tool-updates.js";
 import { availableCommands, createWorkspaceSession, type BridgeSession } from "./sessions.js";
 import packageInfo from "../package.json" with { type: "json" };
 import { SessionIndex } from "./session-index.js";
 import { replayHistory } from "./history.js";
+import { clientMcpEntries, shutdownSession } from "./client-mcp.js";
 
 export interface ServerOptions {
   input: ReadableStream<Uint8Array>;
@@ -17,7 +18,7 @@ export interface ServerOptions {
   modelsPath?: string;
   artifactDir?: string;
   sessionIndexPath?: string;
-  createSession?: (cwd: string, sessionFile?: string) => Promise<BridgeSession>;
+  createSession?: (cwd: string, sessionFile?: string, mcpServers?: McpServer[]) => Promise<BridgeSession>;
 }
 
 interface ActivePrompt {
@@ -41,36 +42,39 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     if (!entry) throw RequestError.invalidParams("Unknown or closed session");
     return entry;
   }
-  function dispose(entry: ManagedSession) {
+  async function dispose(entry: ManagedSession) {
     if (entry.active) {
       entry.active.cancelled = true;
       entry.active.unsubscribe();
+      void entry.session.abort().catch(() => {});
     }
-    entry.session.dispose();
+    try { await shutdownSession(entry.session); }
+    finally { entry.session.dispose(); }
   }
   const connection = new AgentSideConnection((client) => ({
     async initialize(): Promise<InitializeResponse> {
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: "pi-acp-bridge", version: packageInfo.version },
-        agentCapabilities: { loadSession: true, promptCapabilities: { image: true, embeddedContext: true }, sessionCapabilities: { close: {} } },
+        agentCapabilities: { loadSession: true, mcpCapabilities: { http: true }, promptCapabilities: { image: true, embeddedContext: true }, sessionCapabilities: { close: {} } },
         authMethods: [],
         _meta: { "pi-acp-bridge/models": await discoverModels(modelsPath) },
       };
     },
     async newSession(params) {
       if (!isAbsolute(params.cwd)) throw RequestError.invalidParams("cwd must be absolute");
-      if (params.mcpServers.length || params.additionalDirectories?.length) {
-        throw RequestError.invalidParams("MCP servers and additional directories are not supported");
+      if (params.additionalDirectories?.length) {
+        throw RequestError.invalidParams("Additional directories are not supported");
       }
+      clientMcpEntries(params.mcpServers);
       let session: BridgeSession;
-      try { session = await createSession(params.cwd); }
+      try { session = await createSession(params.cwd, undefined, params.mcpServers); }
       catch (error) {
         if (error instanceof RequestError) throw error;
         throw new RequestError(-32603, "Unable to create Pi session; check workspace and Pi configuration");
       }
       if (closed) {
-        session.dispose();
+        await dispose({ session, cwd: params.cwd });
         throw new RequestError(-32603, "Connection closed");
       }
       const sessionId = randomUUID();
@@ -85,20 +89,21 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         return { sessionId, configOptions: modelConfigOptions(session) };
       } catch {
         sessions.delete(sessionId);
-        session.dispose();
+        await dispose({ session, cwd: params.cwd });
         throw new RequestError(-32603, "Unable to persist or advertise Pi session");
       }
     },
     async loadSession(params) {
       const { sessionId, cwd } = params;
-      if (!isAbsolute(cwd) || params.mcpServers.length || params.additionalDirectories?.length) throw RequestError.invalidParams("Unsupported workspace configuration");
+      if (!isAbsolute(cwd) || params.additionalDirectories?.length) throw RequestError.invalidParams("Unsupported workspace configuration");
+      clientMcpEntries(params.mcpServers);
       if (sessions.has(sessionId) || loading.has(sessionId)) throw new RequestError(-32600, "Session already loaded");
       loading.add(sessionId);
       let session: BridgeSession | undefined;
       try {
         const record = await index.get(sessionId);
         if (!record || record.cwd !== cwd) throw RequestError.invalidParams("Unknown session or workspace mismatch");
-        session = await createSession(cwd, record.sessionFile);
+        session = await createSession(cwd, record.sessionFile, params.mcpServers);
         if (closed) throw new Error("Connection closed");
         for (const update of replayHistory(session)) {
           await client.sessionUpdate({ sessionId, update });
@@ -115,7 +120,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         sessions.set(sessionId, { session, cwd });
         return { configOptions: modelConfigOptions(session) };
       } catch (error) {
-        session?.dispose();
+        if (session) await dispose({ session, cwd });
         if (error instanceof RequestError) throw error;
         throw new RequestError(-32603, "Unable to load Pi session; check session index and JSONL file");
       } finally { loading.delete(sessionId); }
@@ -217,14 +222,18 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     async closeSession({ sessionId }) {
       const entry = getSession(sessionId);
       sessions.delete(sessionId);
-      dispose(entry);
+      await dispose(entry);
       return {};
     },
   }), ndJsonStream(output, input));
-  void connection.closed.then(() => {
+  let shuttingDown: Promise<void> | undefined;
+  function shutdown() {
+    if (shuttingDown) return shuttingDown;
     closed = true;
-    for (const entry of sessions.values()) dispose(entry);
+    const closing = [...sessions.values()].map(dispose);
     sessions.clear();
-  });
-  return connection;
+    shuttingDown = Promise.allSettled(closing).then(() => {});
+    return shuttingDown;
+  }
+  return { closed: connection.closed.then(shutdown), shutdown };
 }

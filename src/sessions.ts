@@ -1,7 +1,8 @@
 import { stat, writeFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { createAgentSession, SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { RequestError } from "@agentclientprotocol/sdk";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { RequestError, type McpServer } from "@agentclientprotocol/sdk";
+import { clientMcpExtension, shutdownSession } from "./client-mcp.js";
 
 export type BridgeSession = Pick<AgentSession, "prompt" | "subscribe" | "abort" | "dispose"> &
   Partial<Pick<AgentSession, "sessionFile" | "messages" | "resourceLoader" | "promptTemplates" | "settingsManager" | "extensionRunner" | "model" | "modelRuntime" | "setModel">>;
@@ -19,7 +20,7 @@ export function availableCommands(session: BridgeSession) {
   return [...commands.values()];
 }
 
-export async function createWorkspaceSession(cwd: string, sessionFile?: string): Promise<BridgeSession> {
+export async function createWorkspaceSession(cwd: string, sessionFile?: string, mcpServers: McpServer[] = []): Promise<BridgeSession> {
   if (!isAbsolute(cwd) || !(await stat(cwd).catch(() => undefined))?.isDirectory()) {
     throw RequestError.invalidParams("cwd must be an existing absolute directory");
   }
@@ -36,6 +37,17 @@ export async function createWorkspaceSession(cwd: string, sessionFile?: string):
     await writeFile(path, JSON.stringify(sessionManager.getHeader()) + "\n", { flag: "wx", mode: 0o600 });
     sessionManager = SessionManager.open(path);
   }
-  const { session } = await createAgentSession({ cwd, sessionManager });
-  return session;
+  const resourceLoader = mcpServers.length ? new DefaultResourceLoader({
+    cwd, agentDir: getAgentDir(), extensionFactories: [clientMcpExtension(mcpServers)],
+  }) : undefined;
+  if (resourceLoader) await resourceLoader.reload();
+  const { session } = await createAgentSession({ cwd, sessionManager, resourceLoader });
+  try {
+    if (mcpServers.length) await session.bindExtensions({});
+    return session;
+  } catch (error) {
+    try { await shutdownSession(session); }
+    finally { session.dispose(); }
+    throw error;
+  }
 }

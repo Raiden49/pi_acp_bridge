@@ -17,7 +17,8 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.8.0",
-    "@earendil-works/pi-coding-agent": "^1.2.0"
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@earendil-works/pi-mcp": "1.2.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

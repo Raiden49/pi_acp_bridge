@@ -26,7 +26,7 @@ node dist/index.js
 
 图片输入支持 base64 及本地 `file:` 图片链接，实际推理需要支持视觉的模型。工具图片同时输出 ACP 图片块和文件链接；回退文件保存在 `~/workspace/storage/media/pi-acp-bridge/`，不会自动清理。命令补全来自当前 Pi 会话加载的扩展、提示模板和已启用的技能，不包含仅适用于终端 UI 的内置命令。
 
-推理使用 Pi 已配置的模型及凭据。工作区 `cwd` 隔离上下文与相对路径，但不限制工具访问工作区之外的文件，不构成安全沙箱。不支持 ACP 登录和客户端 MCP 配置。模型切换写入会话历史，不修改全局默认模型。
+推理使用 Pi 已配置的模型及凭据。工作区 `cwd` 隔离上下文与相对路径，但不限制工具访问工作区之外的文件，不构成安全沙箱。支持客户端按会话传入的 stdio / Streamable HTTP MCP 服务，通过 Pi 官方 MCP 扩展连接并提供工具；不支持旧式 SSE、ACP 内嵌 MCP 或 ACP 登录。模型切换写入会话历史，不修改全局默认模型。
 
 JetBrains Air 注册步骤及真实界面验收清单见 [docs/air-integration.md](docs/air-integration.md)。
 

@@ -6,4 +6,7 @@ const connection = startServer({
   input: Readable.toWeb(process.stdin),
   output: Writable.toWeb(process.stdout),
 });
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => { void connection.shutdown().then(() => process.exit(0)); });
+}
 await connection.closed;

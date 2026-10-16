@@ -10,6 +10,7 @@
 - `agentInfo`：`pi-acp-bridge` 及来自 `package.json` 的版本。
 - `agentCapabilities.loadSession: true`：支持从 Pi JSONL 恢复已索引的会话。
 - `agentCapabilities.promptCapabilities: { image: true, embeddedContext: true }`：支持图片和嵌入文本资源；不支持的内容仍明确拒绝。
+- `agentCapabilities.mcpCapabilities: { http: true }`：支持 stdio 与 Streamable HTTP MCP，不广告旧式 SSE 或 ACP 内嵌 MCP。
 - `agentCapabilities.sessionCapabilities.close: {}`：支持 `session/close`。
 - `authMethods: []`：本阶段不提供 ACP 登录方法，不表示所有模型均已认证。
 - `_meta["pi-acp-bridge/models"]`：模型目录扩展。
@@ -46,11 +47,21 @@
 
 - `session/new` 要求 `cwd` 为现有目录的绝对路径，返回独立随机 `sessionId`。使用 `SessionManager.create(cwd)` 创建 Pi JSONL 会话，再调用 `createAgentSession({ cwd, sessionManager })`，由 Pi 在该目录发现项目设置、上下文及工具路径。不调用 `process.chdir()`，不共享会话历史。模型与凭据遵循 Pi 的常规配置。
 - `cwd` 提供上下文及相对路径隔离，**不是文件系统安全沙箱**：绝对路径、`..`、bash 及扩展仍可能访问其他目录。仅应对可信工作区使用。工作区扩展仍遵循 Pi 的资源加载与信任规则。
-- 仅支持单工作区。非空 `mcpServers`、额外目录及不支持的内容返回 `-32602`，不静默忽略。文本块与嵌入文本资源按顺序以换行拼接；非图片资源链接转为 Markdown 链接。图片处理见下文。未配置可用模型/凭据时，会话可以创建，但提示会失败。
+- 仅支持单工作区。额外目录及不支持的内容返回 `-32602`，不静默忽略。文本块与嵌入文本资源按顺序以换行拼接；非图片资源链接转为 Markdown 链接。图片处理见下文。未配置可用模型/凭据时，会话可以创建，但提示会失败。
 - `session/prompt` 在调用 Pi 前订阅事件，将 `message_update` / `text_delta` 映射为 `session/update` 中的 `agent_message_chunk`，将 `thinking_delta` 单独映射为 `agent_thought_chunk`，均使用 `{ type: "text", text: delta }`。思考不混入回复正文，客户端可将其渲染为可折叠区块。文本、思考及工具通知共用有序发送队列，按序排空后才返回提示结果。
 - 不同会话可以并发；同一会话已有活动提示时返回 `-32600`，不隐式排队。正常结束返回 `end_turn`，长度截断返回 `max_tokens`，取消返回 `cancelled`。Pi 推理错误返回不含原始提供商细节的 `-32603`。
 - `session/cancel` 立即调用 Pi `abort()`，活动提示结算为 `cancelled`；即使 Pi 的提示 Promise 因中止而拒绝，也不返回推理错误。已发送的文本和思考片段不撤回，不清空 Pi 历史；取消后不再发送该提示的排队或新增片段。保留会话供后续提示使用，提示成功、失败或取消后均移除桥接订阅。
-- `session/close` 从会话表删除会话、阻止后续通知、取消活动提示并调用 `session.dispose()`。连接断开时释放所有会话；创建过程中断开连接时，创建完成后立即释放。未知或已关闭的会话在提示请求中返回 `-32602`；关闭不删除持久化历史，随后可通过 `session/load` 重新打开。
+- `session/close` 从会话表删除会话、阻止后续通知、取消活动提示，等待扩展 `session_shutdown` 完成 MCP 清理后调用 `session.dispose()`。连接断开时释放所有会话；创建过程中断开连接时，创建完成后立即释放。未知或已关闭的会话在提示请求中返回 `-32602`；关闭不删除持久化历史，随后可通过 `session/load` 重新打开。
+
+## 客户端 MCP
+
+`session/new` 和 `session/load` 的 `mcpServers` 支持 stdio（`command`、`args`、`env`）与 Streamable HTTP（`type: "http"`、`url`、`headers`）。旧式 SSE 和 ACP 内嵌传输返回 `-32602`。服务名须由字母、数字、下划线、连字符构成；重复名称或 `-`/`_` 归一化后冲突会被拒绝。
+
+客户端配置仅存在于当前会话的 Pi 官方 MCP 扩展中，不写 `mcp.json` 或会话索引，不启动 Pi 子进程。stdio 服务在会话工作区运行；客户端 env/headers 按字面值传入，不执行 Pi 配置的 `!command` 或 `${VAR}` 插值。HTTP 使用客户端提供的 headers，不自动复用 Pi 模型认证。客户端可指定本地进程与网络地址，因此只接受可信 IDE。Pi 的普通工具与用户扩展不受替换。
+
+服务在 `session_start` 时异步连接，工具以 `mcp__<server>__<tool>` 直接提供给模型。工具发现、分页、动态工具列表、资源工具、调用与取消信号由官方 MCP 扩展处理，工具事件继续走现有 ACP `tool_call` / `tool_call_update` 映射。首个提示按 Pi 默认最多等待 direct 服务 10 秒；连接失败不等同于会话创建失败，失败的服务不会提供工具；Pi 的 `/mcp` 状态管理属于扩展 UI，当前桥接器尚未映射其通知面板，因此不把会话创建成功作为 MCP 连通证据。这里不增加 MCP OAuth 登录界面，也不默认加载用户/项目 `mcp.json` 中的其他服务。
+
+关闭会话、ACP 输入断开或 CLI 收到 SIGTERM/SIGINT 时发出 `session_shutdown`，等待 MCP 连接释放再 dispose；stdio 进程由官方 transport 关闭 stdin 并终止，HTTP 会话发送 DELETE。取消提示仅取消当前请求，保留连接供后续提示使用。恢复会话重新采用客户端本次传入的配置。
 
 ## 图片、命令发现与持久化
 
@@ -68,7 +79,7 @@
 
 - 索引默认位于 Pi agent 目录的 `acp-sessions.json`（默认 `~/.pi/agent/`，遵循 `PI_CODING_AGENT_DIR`），格式为 `{ "<ACP sessionId>": { "cwd": "/workspace", "sessionFile": "/.../sessions/...jsonl" } }`。JSONL 使用 Pi 默认的会话目录分组。为让尚未开始对话的 ACP ID 也可恢复，创建时先写入 Pi 生成的会话头，再由 Pi 管理后续写入。
 - 索引更新使用同目录临时文件和原子 rename，并用 `.lock` 目录串行化多个进程的读改写，防止丢失其他会话。文件权限为 `0600`；损坏索引拒绝覆盖并返回泛化错误。进程异常终止可能遗留锁，等待 5 秒仍未释放时失败；确认无桥接器写入后可手动删除该 `.lock` 目录。
-- `session/load` 要求已索引的 ID 和与创建时完全相同的绝对 `cwd`；拒绝 MCP、额外目录及本连接已经加载或正在加载的 ID。读取索引对应 JSONL，经 Pi `SessionManager.open()` 恢复模型上下文，回放当前分支的用户/助手文本、图片、思考和工具调用结果，最后发送命令列表。工具图片也重新提供文件链接。历史回放不会重新执行工具或发起模型请求。
+- `session/load` 要求已索引的 ID 和与创建时完全相同的绝对 `cwd`；拒绝额外目录及本连接已经加载或正在加载的 ID；使用本次请求携带的 MCP 配置重新建立连接，不复用旧客户端的端口或凭据。读取索引对应 JSONL，经 Pi `SessionManager.open()` 恢复模型上下文，回放当前分支的用户/助手文本、图片、思考和工具调用结果，最后发送命令列表。工具图片也重新提供文件链接。历史回放不会重新执行工具或发起模型请求。
 - 关闭或断线后索引和 JSONL 均保留。移走、删除或损坏 JSONL 后加载失败，不偷偷创建替代会话。索引只序列化映射写入，**不提供跨进程 JSONL 会话租约**：跨客户端恢复应先关闭原客户端，不支持多个进程同时编辑同一会话。
 
 ## 自主工具执行与文件变更
@@ -85,7 +96,9 @@ Pi 在桥接器进程内自主执行已启用工具，不额外请求 ACP 权限
 
 `test/protocol-harness.ts` 用 `duplexPair()` 创建双向内存流，连接与 CLI 相同的 `startServer()`；测试仅收发带换行的 JSON-RPC，不查看 handler 或 Pi 的私有状态，不调用模型网络服务。
 
-`test/bundle.test.ts` 构建压缩单文件产物，检查 shebang 与 10 MB 体积预算，并启动禁止加载外部模块的真实 Node 进程进行 stdio 握手；进程 stdin 关闭后必须在超时内退出。同时经 `session/new` 验证用户目录的 TypeScript 扩展能使用内嵌 TypeBox、注册命令与可用模型提供商。生产构建设置 `PI_BUNDLED_NODE=true`，确保 Pi 使用内嵌模块加载扩展，而非依赖原始 SDK 安装路径。此测试不调用真实模型或 IDE。
+`test/bundle.test.ts` 构建压缩单文件产物，检查 shebang 与 10 MB 体积预算，并启动禁止加载外部模块的真实 Node 进程进行 stdio 握手；SIGTERM 后必须在超时内退出并结束会话中的 MCP 子进程。同时经 `session/new` 验证用户目录的 TypeScript 扩展能使用内嵌 TypeBox、注册命令与可用模型提供商。生产构建设置 `PI_BUNDLED_NODE=true`，确保 Pi 使用内嵌模块加载扩展，而非依赖原始 SDK 安装路径。此测试不调用真实模型或 IDE。
+
+`test/mcp.test.ts` 经过 ACP 与真实 Pi 会话调用本地 stdio / HTTP MCP 工具，验证 env/headers 字面值、工作目录、恢复时更新的客户端配置、关闭后的子进程退出及断线时 HTTP 会话释放；没有真实模型请求，HTTP 服务只监听随机回环端口，测试结束关闭。
 
 `test/models.test.ts` 使用真实 Pi 会话，仅替换模型网络流，经 ACP 验证原生下拉框、切换后提示实际使用所选模型、其他会话不受影响，以及未认证模型不展示且不可选择、未知模型/配置项拒绝；恢复时的配置广告由持久化测试覆盖。内存协议测试结束时显式关闭双向流的两个写端，兼容 Node 22 的 half-open 行为。
 

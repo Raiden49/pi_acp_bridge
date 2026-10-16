@@ -3,6 +3,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { expect, test } from "vitest";
 
 const exec = promisify(execFile);
@@ -65,10 +66,31 @@ test("standalone production bundle initializes and loads configured provider ext
     try {
       expect(await request(1, "initialize", { protocolVersion: 1, clientCapabilities: {} }))
         .toMatchObject({ result: { agentInfo: { name: "pi-acp-bridge", version: "0.1.0" } } });
-      const session = await request(2, "session/new", { cwd: root, mcpServers: [] });
+      const pidFile = resolve(root, "mcp.pid");
+      const mcpScript = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+        const lines = require('node:readline').createInterface({ input: process.stdin });
+        lines.on('line', line => { const m = JSON.parse(line); if (m.id === undefined) return;
+          const result = m.method === 'initialize'
+            ? { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } }
+            : { tools: [] };
+          process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\\n');
+        });
+        lines.on('close', () => process.exit(0));`;
+      const session = await request(2, "session/new", { cwd: root, mcpServers: [
+        { name: "ide", command: process.execPath, args: ["-e", mcpScript], env: [] },
+      ] });
       expect(session.result?.configOptions[0]?.options).toContainEqual({ value: "bundle-provider/extension-model", name: "Extension model (bundle-provider)" });
       const commands = messages.find((message) => message.params?.update?.sessionUpdate === "available_commands_update");
       expect(commands?.params.update.availableCommands).toContainEqual({ name: "bundle-extension", description: "string" });
+      let pid = "";
+      for (let attempt = 0; attempt < 50 && !pid; attempt++) {
+        pid = await readFile(pidFile, "utf8").catch(() => "");
+        if (!pid) await delay(10);
+      }
+      expect(pid).not.toBe("");
+      child.child.kill("SIGTERM");
+      await child;
+      expect(() => process.kill(Number(pid), 0)).toThrow();
     } finally {
       child.child.stdin!.end();
       await child;
