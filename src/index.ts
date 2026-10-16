@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { Readable, Writable } from "node:stream";
 import { startServer } from "./server.js";
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+
+// Pi's static OAuth loaders also support standalone Node bundles.
+// Without them, lazy relative imports resolve beside the bundled CLI.
+registerBunOAuthFlows();
 
 const connection = startServer({
   input: Readable.toWeb(process.stdin),

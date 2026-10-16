@@ -44,6 +44,8 @@ Air 的实际聊天会向 `session/new` 注入 MCP 服务，即使它探测模�
 
 ## 已定位的集成故障
 
+- OpenAI OAuth 模型可展示、可选择，但提示返回统一错误：会话 JSONL 中实际为 `OAuth auth derivation failed ... Cannot find module .../dist/openai-chatgpt.js`。Pi 的 OAuth loader 使用变量动态导入，单文件构建无法自动收集模块；CLI 现注册 Pi 官方静态 OAuth loaders（导出名为 `registerBunOAuthFlows`，同样适用于 Node）。bundle 回归用临时假凭据实际执行 `ModelRuntime.getAuth('openai')`，禁止网络与外部模块加载，不接触用户认证。
+
 - 单文件构建必须定义 `PI_BUNDLED_NODE=true`。Pi SDK 据此使用内嵌虚拟模块和 `jiti/static` 加载扩展；否则初始化仍成功，但文件型扩展会因 `Cannot find module 'typebox'` 全部失效，扩展提供商（例如 `pi-antigravity`）也会从模型下拉框消失。不能仅用初始化握手证明生产 bundle 支持 Pi 配置。
 - Air 日志出现 `Cannot insert duplicate value AgentId(...)`，随后出现 `Failed to obtain agent frontend provider` 时，提交动作会在 IDE 前端失败，桥接器收不到 `session/prompt`。这不证明用户选错代理，也不证明模型服务未响应。可在用户授权后换一个临时代理名称验证是否能绕开该注册状态，不应擅自清空聊天或缓存。本次诊断暂用 `Pi-Bridge (Check)`，保留脱敏跟踪入口；真实聊天仍待验证。
 - Air 可成功显示用户消息但随后立即报错：若跟踪显示 `session/new` 的 `mcpCount: 1`，旧版本会因拒绝客户端 MCP 返回 `-32602`，尚未调用模型。现通过真实接入修复，不静默丢弃 MCP 参数。

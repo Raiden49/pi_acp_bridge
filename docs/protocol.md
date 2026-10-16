@@ -96,7 +96,7 @@ Pi 在桥接器进程内自主执行已启用工具，不额外请求 ACP 权限
 
 `test/protocol-harness.ts` 用 `duplexPair()` 创建双向内存流，连接与 CLI 相同的 `startServer()`；测试仅收发带换行的 JSON-RPC，不查看 handler 或 Pi 的私有状态，不调用模型网络服务。
 
-`test/bundle.test.ts` 构建压缩单文件产物，检查 shebang 与 10 MB 体积预算，并启动禁止加载外部模块的真实 Node 进程进行 stdio 握手；SIGTERM 后必须在超时内退出并结束会话中的 MCP 子进程。同时经 `session/new` 验证用户目录的 TypeScript 扩展能使用内嵌 TypeBox、注册命令与可用模型提供商。生产构建设置 `PI_BUNDLED_NODE=true`，确保 Pi 使用内嵌模块加载扩展，而非依赖原始 SDK 安装路径。此测试不调用真实模型或 IDE。
+`test/bundle.test.ts` 构建压缩单文件产物，检查 shebang 与 10 MB 体积预算，并启动禁止加载外部模块的真实 Node 进程进行 stdio 握手；SIGTERM 后必须在超时内退出并结束会话中的 MCP 子进程。同时经 `session/new` 验证用户目录的 TypeScript 扩展能使用内嵌 TypeBox、注册命令与可用模型提供商。生产构建设置 `PI_BUNDLED_NODE=true`，确保 Pi 使用内嵌模块加载扩展，而非依赖原始 SDK 安装路径。CLI 同时注册 Pi 官方静态 OAuth loaders，避免认证阶段的变量动态导入在 bundle 旁查找不存在的模块；回归测试以临时假 OAuth 凭据执行 OpenAI 认证派生并验证结果，禁止网络访问。此测试不调用真实模型或 IDE。
 
 `test/mcp.test.ts` 经过 ACP 与真实 Pi 会话调用本地 stdio / HTTP MCP 工具，验证 env/headers 字面值、工作目录、恢复时更新的客户端配置、关闭后的子进程退出及断线时 HTTP 会话释放；没有真实模型请求，HTTP 服务只监听随机回环端口，测试结束关闭。
 

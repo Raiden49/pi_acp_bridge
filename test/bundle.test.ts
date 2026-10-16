@@ -8,7 +8,7 @@ import { expect, test } from "vitest";
 
 const exec = promisify(execFile);
 
-test("standalone production bundle initializes and loads configured provider extensions", async () => {
+test("standalone production bundle loads extensions, derives OAuth auth and cleans up MCP", async () => {
   await mkdir(".scratch", { recursive: true });
   const root = await mkdtemp(resolve(".scratch/bundle-"));
   try {
@@ -22,11 +22,25 @@ test("standalone production bundle initializes and loads configured provider ext
       baseline: { baseUrl: "https://example.invalid/v1", api: "openai-completions", apiKey: "test-only",
         models: [{ id: "baseline-model" }] },
     } }));
+    const oauthPath = resolve(root, "oauth.json");
+    await writeFile(oauthPath, JSON.stringify({ openai: {
+      type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 3_600_000,
+    } }));
     await writeFile(resolve(agentDir, "extensions/provider.ts"), `
       import { Type } from '@sinclair/typebox';
+      import { ModelRuntime } from '@earendil-works/pi-coding-agent';
+      import { writeFileSync } from 'node:fs';
       export default function (pi) {
         const schema = Type.String();
         pi.registerCommand('bundle-extension', { description: schema.type, handler: async () => {} });
+        pi.registerCommand('bundle-oauth', { description: 'Verify bundled OAuth', handler: async () => {
+          const runtime = await ModelRuntime.create({ authPath: ${JSON.stringify(oauthPath)},
+            modelsPath: ${JSON.stringify(resolve(root, "absent-models.json"))},
+            refreshOnCreate: false, allowModelNetwork: false });
+          const result = await runtime.getAuth('openai');
+          if (result?.auth.apiKey !== 'fixture-access') throw new Error('OAuth derivation failed');
+          writeFileSync(${JSON.stringify(resolve(root, "oauth-success"))}, 'ok');
+        } });
         pi.registerProvider('bundle-provider', {
           baseUrl: 'https://example.invalid/v1', api: 'openai-completions', apiKey: 'test-only',
           models: [{ id: 'extension-model', name: 'Extension model', reasoning: false,
@@ -45,6 +59,7 @@ test("standalone production bundle initializes and loads configured provider ext
         if (result.url !== entry && !isBuiltin(result.url)) throw new Error('External dependency: ' + result.url);
         return result;
       } });
+      globalThis.fetch = async () => { throw new Error('Network forbidden in bundle regression'); };
       await import(entry);`;
     const child = exec(process.execPath, ["--input-type=module", "--eval", script], {
       cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" }, timeout: 10_000,
@@ -88,6 +103,10 @@ test("standalone production bundle initializes and loads configured provider ext
         if (!pid) await delay(10);
       }
       expect(pid).not.toBe("");
+      expect(await request(3, "session/prompt", {
+        sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-oauth" }],
+      })).toMatchObject({ result: { stopReason: "end_turn" } });
+      expect(await readFile(resolve(root, "oauth-success"), "utf8").catch(() => "not-derived")).toBe("ok");
       child.child.kill("SIGTERM");
       await child;
       expect(() => process.kill(Number(pid), 0)).toThrow();
