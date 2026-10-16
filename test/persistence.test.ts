@@ -50,10 +50,13 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
       if (update.sessionUpdate === "available_commands_update") break;
       history.push(update);
     }
+    expect(history.filter((update) => update.sessionUpdate === "agent_message_chunk")
+      .every((update) => update.content.type === "text")).toBe(true);
     expect(history).toEqual(expect.arrayContaining([
       expect.objectContaining({ sessionUpdate: "tool_call_update", toolCallId: "read-image" }),
-      { sessionUpdate: "agent_message_chunk", content: { type: "image", data: "AA==", mimeType: "image/png" } },
-      expect.objectContaining({ sessionUpdate: "agent_message_chunk", content: expect.objectContaining({ type: "resource_link" }) }),
+      expect.objectContaining({ sessionUpdate: "agent_message_chunk", content: {
+        type: "text", text: expect.stringContaining("[打开图片](file:///"),
+      } }),
     ]));
     expect(await client.request("session/load", { sessionId, cwd, mcpServers: [] }))
       .toMatchObject({ error: { code: -32600 } });

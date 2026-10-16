@@ -37,5 +37,8 @@ export async function imageLink(image: Image, artifactDir: string): Promise<Cont
   await mkdir(artifactDir, { recursive: true });
   const path = join(artifactDir, name);
   await writeFile(path, bytes, { mode: 0o600 });
-  return { type: "resource_link", uri: pathToFileURL(path).href, name, mimeType: image.mimeType };
+  // Some ACP clients stringify non-text assistant chunks, exposing image base64.
+  // Keep native images in tool results; present a portable file link in chat.
+  const uri = pathToFileURL(path).href;
+  return { type: "text", text: `\n\n[打开图片](${uri})\n\n图片文件：\`${fileURLToPath(uri)}\`\n\n` };
 }

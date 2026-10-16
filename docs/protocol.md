@@ -68,7 +68,7 @@
 ### 图片
 
 - ACP `{ type: "image", mimeType, data }` 的 base64 数据传入 Pi `prompt(text, { images })`，不会嵌入文本。`image` 块的 `data` 为空时，可用 `uri: "file:///absolute/path.png"` 指定本地文件；也支持带 `image/*` MIME 的 `resource_link`。不下载 HTTP 图片。base64 格式错误或本地文件不可读时返回 `-32602`。图片能力不意味着当前模型一定支持视觉。
-- Pi 工具增量及最终结果的图片保留在 ACP 工具 `content` 中；最终结果还产生 `agent_message_chunk` 图片。图片 bytes 按 SHA-256 命名，保存至 `~/workspace/storage/media/pi-acp-bridge/`，随后发送一个 `resource_link` 文件链接，供无法渲染图片块的客户端回退。测试可通过 `ServerOptions.artifactDir` 覆盖目录。文件不会自动删除；可能包含敏感信息，应由用户按资产生命周期管理。无法保存或发送时，提示返回 `-32603`，不会伪造成功链接。
+- Pi 工具增量及最终结果的图片保留在 ACP 工具 `content` 中。最终图片 bytes 按 SHA-256 命名，保存至 `~/workspace/storage/media/pi-acp-bridge/`；聊天正文只发送 text 类型的 `agent_message_chunk`，包含 Markdown 绝对 `file:///` 链接及可复制的绝对路径。历史回放也采用同一转换，不再向助手正文发送图片或 `resource_link` 对象，避免 Air 将其显示成包含 Base64 的 JSON。此方式不保证客户端内嵌预览，也不改写模型自行生成的相对路径链接；以桥接器提供的“打开图片”链接为准。测试可通过 `ServerOptions.artifactDir` 覆盖目录。文件不会自动删除；可能包含敏感信息，应由用户按资产生命周期管理。无法保存或发送时，提示返回 `-32603`，不会伪造成功链接。
 
 ### 命令发现
 
@@ -110,7 +110,7 @@ Pi 在桥接器进程内自主执行已启用工具，不额外请求 ACP 权限
 
 `test/tools.test.ts` 使用真实 Pi 工具与确定性模型流，经 ACP 验证自主读取生命周期、导航位置、编辑及覆盖写入前后内容、新文件 Diff、失败编辑和问卷 Markdown 展示，无真实模型请求。
 
-`test/multimodal.test.ts` 经 NDJSON 验证内嵌和文件链接图片传给 Pi、工具图片双通道输出及回退文件 bytes。`test/commands.test.ts` 使用真实 Pi 资源加载器验证模板、扩展、技能发现及禁用技能设置。`test/persistence.test.ts` 使用真实 Pi JSONL 和 AgentSession 验证索引、跨连接加载、工作区匹配、历史与工具图片回放。`test/session-index.test.ts` 验证独立索引写入者并发时不丢映射，损坏索引不被覆盖。所有测试资产位于 `.scratch/`，不写个人 Pi 配置。
+`test/multimodal.test.ts` 经 NDJSON 验证内嵌和文件链接图片传给 Pi、工具原生图片、正文 Markdown 绝对文件链接及落盘文件 bytes。`test/commands.test.ts` 使用真实 Pi 资源加载器验证模板、扩展、技能发现及禁用技能设置。`test/persistence.test.ts` 使用真实 Pi JSONL 和 AgentSession 验证索引、跨连接加载、工作区匹配、历史与工具图片回放。`test/session-index.test.ts` 验证独立索引写入者并发时不丢映射，损坏索引不被覆盖。所有测试资产位于 `.scratch/`，不写个人 Pi 配置。
 
 ## 参考
 

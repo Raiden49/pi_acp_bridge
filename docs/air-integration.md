@@ -48,6 +48,8 @@ Air 的实际聊天会向 `session/new` 注入 MCP 服务，即使它探测模�
 
 ## 已定位的集成故障
 
+- 生成图片后聊天正文出现大段 Base64 / `resource_link` JSON：Air 将非文本助手块序列化展示，未渲染成附件。现保留工具中的原生图片，但正文及恢复历史统一返回 Markdown“打开图片”绝对文件链接和可复制路径。模型自行输出的相对图片链接仍可能不可用，请使用桥接器提供的链接；不宣称已支持正文内嵌预览。链接在真实 Air 中的点击行为仍待验收。
+
 - 图片提示返回“大小限制”，但原图仅约 912 KiB、1254×1254：Pi 在 Photon 加载失败时也返回 `[Image omitted: could not be resized below the inline image size limit.]`。生产构建现将 Photon WASM 压缩内嵌，避免依赖 bundle 外的文件；SDK 的 resize worker 不存在时使用官方进程内回退。独立 bundle 图片处理回归通过，并用该原图完成无模型请求验证。macOS 浮动截图拖入后、ACP 提示尚未到达的卡住问题尚未确认解决。
 
 - OpenAI OAuth 模型可展示、可选择，但提示返回统一错误：会话 JSONL 中实际为 `OAuth auth derivation failed ... Cannot find module .../dist/openai-chatgpt.js`。Pi 的 OAuth loader 使用变量动态导入，单文件构建无法自动收集模块；CLI 现注册 Pi 官方静态 OAuth loaders（导出名为 `registerBunOAuthFlows`，同样适用于 Node）。bundle 回归用临时假凭据实际执行 `ModelRuntime.getAuth('openai')`，禁止网络与外部模块加载，不接触用户认证。

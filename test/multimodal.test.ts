@@ -30,9 +30,9 @@ test("passes inline and file-linked images to Pi and advertises vision support",
   } finally { await client.close(); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test("emits tool images in assistant and tool content with a readable fallback file", async () => {
+test("keeps native tool images but presents assistant images as readable absolute links", async () => {
   await mkdir(".scratch", { recursive: true });
-  const artifactDir = await mkdtemp(resolve(".scratch/artifacts-"));
+  const artifactDir = await mkdtemp(resolve(".scratch/artifacts with space-"));
   let listener: Parameters<AgentSession["subscribe"]>[0] = () => {};
   const client = protocolHarness(".scratch/absent-models.json", { artifactDir, createSession: async () => ({
     subscribe(fn) { listener = fn; return () => {}; }, abort: async () => {}, dispose() {},
@@ -46,11 +46,12 @@ test("emits tool images in assistant and tool content with a readable fallback f
     expect(await client.request("session/prompt", { sessionId, prompt: [] })).toHaveProperty("result");
     const tool = (await client.nextNotification()).params.update;
     expect(tool.content[0]).toEqual({ type: "content", content: { type: "image", data: png, mimeType: "image/png" } });
-    expect((await client.nextNotification()).params.update).toMatchObject({
-      sessionUpdate: "agent_message_chunk", content: { type: "image", data: png, mimeType: "image/png" },
-    });
-    const link = (await client.nextNotification()).params.update.content;
-    expect(link).toMatchObject({ type: "resource_link", mimeType: "image/png" });
-    expect(await readFile(new URL(link.uri))).toEqual(Buffer.from(png, "base64"));
+    const update = (await client.nextNotification()).params.update;
+    expect(update).toMatchObject({ sessionUpdate: "agent_message_chunk", content: { type: "text" } });
+    expect(update.content.text).not.toContain(png);
+    const uri = update.content.text.match(/\]\((file:\/\/\/[^)]+)\)/)?.[1];
+    expect(uri).toContain("artifacts%20with%20space-");
+    expect(await readFile(new URL(uri!))).toEqual(Buffer.from(png, "base64"));
+    expect(update.content.text).toContain(artifactDir);
   } finally { await client.close(); await rm(artifactDir, { recursive: true, force: true }); }
 });

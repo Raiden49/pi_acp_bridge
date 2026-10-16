@@ -106,12 +106,9 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         session = await createSession(cwd, record.sessionFile, params.mcpServers);
         if (closed) throw new Error("Connection closed");
         for (const update of replayHistory(session)) {
-          await client.sessionUpdate({ sessionId, update });
-          if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "image") {
-            await client.sessionUpdate({ sessionId, update: {
-              sessionUpdate: "agent_message_chunk", content: await imageLink(update.content, artifactDir),
-            } });
-          }
+          const presented = update.sessionUpdate === "agent_message_chunk" && update.content.type === "image"
+            ? { ...update, content: await imageLink(update.content, artifactDir) } : update;
+          await client.sessionUpdate({ sessionId, update: presented });
         }
         if (session.resourceLoader) await client.sessionUpdate({ sessionId, update: {
           sessionUpdate: "available_commands_update", availableCommands: availableCommands(session),
@@ -181,9 +178,6 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
               if (block.type !== "image") continue;
               updates = updates.then(async () => {
                 if (active.cancelled) return;
-                await client.sessionUpdate({ sessionId: params.sessionId, update: {
-                  sessionUpdate: "agent_message_chunk", content: block,
-                } });
                 const link = await imageLink(block, artifactDir);
                 if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update: {
                   sessionUpdate: "agent_message_chunk", content: link,
