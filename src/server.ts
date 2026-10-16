@@ -11,6 +11,7 @@ import packageInfo from "../package.json" with { type: "json" };
 import { SessionIndex } from "./session-index.js";
 import { replayHistory } from "./history.js";
 import { clientMcpEntries, shutdownSession } from "./client-mcp.js";
+import { ImageLinkStream } from "./image-links.js";
 
 export interface ServerOptions {
   input: ReadableStream<Uint8Array>;
@@ -106,8 +107,14 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         session = await createSession(cwd, record.sessionFile, params.mcpServers);
         if (closed) throw new Error("Connection closed");
         for (const update of replayHistory(session)) {
-          const presented = update.sessionUpdate === "agent_message_chunk" && update.content.type === "image"
-            ? { ...update, content: await imageLink(update.content, artifactDir) } : update;
+          let presented = update;
+          if (update.sessionUpdate === "agent_message_chunk") {
+            if (update.content.type === "image") presented = { ...update, content: await imageLink(update.content, artifactDir) };
+            else if (update.content.type === "text") {
+              const links = new ImageLinkStream(cwd);
+              presented = { ...update, content: { ...update.content, text: links.push(update.content.text) + links.finish() } };
+            }
+          }
           await client.sessionUpdate({ sessionId, update: presented });
         }
         if (session.resourceLoader) await client.sessionUpdate({ sessionId, update: {
@@ -152,6 +159,15 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       // Pi listeners are synchronous; serialize writes and drain before responding.
       let updates = Promise.resolve();
       const toolUpdates = createToolUpdates(entry.cwd);
+      const imageLinks = new ImageLinkStream(entry.cwd);
+      function enqueueText(text: string, sessionUpdate: "agent_message_chunk" | "agent_thought_chunk" = "agent_message_chunk") {
+        if (!text) return;
+        updates = updates.then(async () => {
+          if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update: {
+            sessionUpdate, content: { type: "text", text },
+          } });
+        }).catch(() => { deliveryFailed = true; });
+      }
       try {
         active.unsubscribe = entry.session.subscribe((event) => {
           if (active.cancelled) return;
@@ -161,12 +177,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
             const sessionUpdate = event.assistantMessageEvent.type === "thinking_delta"
               ? "agent_thought_chunk" as const : "agent_message_chunk" as const;
             const text = event.assistantMessageEvent.delta;
-            updates = updates.then(async () => {
-              if (active.cancelled) return;
-              await client.sessionUpdate({ sessionId: params.sessionId, update: {
-                sessionUpdate, content: { type: "text", text },
-              } });
-            }).catch(() => { deliveryFailed = true; });
+            enqueueText(sessionUpdate === "agent_message_chunk" ? imageLinks.push(text) : text, sessionUpdate);
           }
           for (const update of toolUpdates(event)) {
             updates = updates.then(async () => {
@@ -186,6 +197,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
             }
           }
           if (event.type === "message_end" && event.message.role === "assistant") {
+            enqueueText(imageLinks.finish());
             failed = event.message.stopReason === "error";
             stopReason = event.message.stopReason === "aborted" ? "cancelled"
               : event.message.stopReason === "length" ? "max_tokens" : "end_turn";
@@ -193,6 +205,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         });
         if (images.length) await entry.session.prompt(text, { images });
         else await entry.session.prompt(text);
+        enqueueText(imageLinks.finish());
         await updates;
         if (active.cancelled) return { stopReason: "cancelled" as const };
         if (failed || deliveryFailed) throw new Error("Prompt failed");

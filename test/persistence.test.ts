@@ -19,6 +19,11 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
       manager.appendMessage({ role: "toolResult", toolCallId: "read-image", toolName: "read", isError: false,
         content: [{ type: "image", data: "AA==", mimeType: "image/png" }], timestamp: 2,
       });
+      manager.appendMessage({ role: "assistant", api: "anthropic-messages", provider: "anthropic", model: "fixture",
+        content: [{ type: "text", text: "![robot](./robot.png)" }], stopReason: "stop", timestamp: 3,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      });
     }
     const settingsManager = SettingsManager.inMemory();
     const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
@@ -53,6 +58,7 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
     expect(history.filter((update) => update.sessionUpdate === "agent_message_chunk")
       .every((update) => update.content.type === "text")).toBe(true);
     expect(history).toEqual(expect.arrayContaining([
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `[robot](file://${cwd}/robot.png)` } },
       expect.objectContaining({ sessionUpdate: "tool_call_update", toolCallId: "read-image" }),
       expect.objectContaining({ sessionUpdate: "agent_message_chunk", content: {
         type: "text", text: expect.stringContaining("[打开图片](file:///"),

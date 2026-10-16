@@ -39,6 +39,9 @@ test("keeps native tool images but presents assistant images as readable absolut
     async prompt() {
       listener({ type: "tool_execution_end", toolCallId: "image", toolName: "read", isError: false,
         result: { content: [{ type: "image", data: png, mimeType: "image/png" }], details: {} } });
+      for (const delta of ["![robot](/tmp/", "robot.jpg)"]) {
+        listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta } } as Parameters<typeof listener>[0]);
+      }
     },
   }) });
   try {
@@ -53,5 +56,8 @@ test("keeps native tool images but presents assistant images as readable absolut
     expect(uri).toContain("artifacts%20with%20space-");
     expect(await readFile(new URL(uri!))).toEqual(Buffer.from(png, "base64"));
     expect(update.content.text).toContain(artifactDir);
+    expect((await client.nextNotification()).params.update.content).toEqual({
+      type: "text", text: "[robot](file:///tmp/robot.jpg)",
+    });
   } finally { await client.close(); await rm(artifactDir, { recursive: true, force: true }); }
 });
