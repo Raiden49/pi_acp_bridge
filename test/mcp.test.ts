@@ -61,7 +61,6 @@ test.each(["stdio", "http"] as const)("ACP %s MCP tools preserve credentials and
     const { session } = await createAgentSession({ cwd, agentDir: root, settingsManager, resourceLoader: loader,
       sessionManager: file ? SessionManager.open(file) : SessionManager.create(cwd, resolve(root, "sessions")), modelRuntime: runtime, model,
     });
-    await session.bindExtensions({});
     type Stream = Awaited<ReturnType<AgentSession["agent"]["streamFunction"]>>;
     session.agent.streamFunction = (_model, context) => {
       const last = context.messages.at(-1)!;
@@ -91,19 +90,29 @@ test.each(["stdio", "http"] as const)("ACP %s MCP tools preserve credentials and
       expect(result.error).toBeUndefined();
       sessionId ??= result.result.sessionId;
       while ((await client.nextNotification()).params.update.sessionUpdate !== "available_commands_update") {}
-      expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Use echo" }] }))
-        .toMatchObject({ result: { stopReason: "end_turn" } });
-      const updates = [];
-      for (;;) {
-        const message = await client.nextNotification();
-        updates.push(message.params.update);
-        if (message.params.update.sessionUpdate === "agent_message_chunk") break;
+      let echoed: { marker: string; cwd: string; pid?: number } | undefined;
+      for (const reload of marker === "restored" ? [false] : [false, true]) {
+        if (reload) {
+          expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/reload" }] }))
+            .toMatchObject({ result: { stopReason: "end_turn" } });
+          while ((await client.nextNotification()).params.update.sessionUpdate !== "config_option_update") {}
+          if (transport === "stdio") expect(() => process.kill(echoed!.pid!, 0)).toThrow();
+          else { expect(httpClosed).toBe(true); httpClosed = false; }
+        }
+        expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Use echo" }] }))
+          .toMatchObject({ result: { stopReason: "end_turn" } });
+        const updates = [];
+        for (;;) {
+          const message = await client.nextNotification();
+          updates.push(message.params.update);
+          if (message.params.update.sessionUpdate === "agent_message_chunk") break;
+        }
+        echoed = JSON.parse(JSON.parse(updates.at(-1).content.text)[0].text);
+        expect(echoed).toMatchObject({ marker, cwd: root });
       }
-      const echoed = JSON.parse(JSON.parse(updates.at(-1).content.text)[0].text);
-      expect(echoed).toMatchObject({ marker, cwd: root });
       if (transport === "stdio" || marker !== "restored") {
         expect(await client.request("session/close", { sessionId })).toHaveProperty("result");
-        if (transport === "stdio") expect(() => process.kill(echoed.pid, 0)).toThrow();
+        if (transport === "stdio") expect(() => process.kill(echoed!.pid!, 0)).toThrow();
       } else {
         await client.close();
         expect(httpClosed).toBe(true);

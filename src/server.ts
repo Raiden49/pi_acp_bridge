@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
-import { decodePrompt, imageLink } from "./content.js";
+import { decodePrompt, imageLink, toolImageLinks } from "./content.js";
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type { InitializeResponse, StopReason, McpServer } from "@agentclientprotocol/sdk";
 import { discoverModels, modelConfigOptions } from "./models.js";
@@ -12,6 +12,8 @@ import { SessionIndex } from "./session-index.js";
 import { replayHistory } from "./history.js";
 import { clientMcpEntries, shutdownSession } from "./client-mcp.js";
 import { ImageLinkStream } from "./image-links.js";
+import { parseBridgeCommand, sessionReport } from "./commands.js";
+import { bindExtensionUI } from "./extension-ui.js";
 
 export interface ServerOptions {
   input: ReadableStream<Uint8Array>;
@@ -25,12 +27,15 @@ export interface ServerOptions {
 interface ActivePrompt {
   cancelled: boolean;
   unsubscribe: () => void;
+  notify?: (text: string) => void;
+  settled: Promise<void>;
 }
 interface ManagedSession {
   session: BridgeSession;
   cwd: string;
   active?: ActivePrompt;
   changingModel?: boolean;
+  notices?: string[];
 }
 
 export function startServer({ input, output, modelsPath, artifactDir = join(homedir(), "workspace/storage/media/pi-acp-bridge"), sessionIndexPath, createSession = createWorkspaceSession }: ServerOptions) {
@@ -43,11 +48,21 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     if (!entry) throw RequestError.invalidParams("Unknown or closed session");
     return entry;
   }
+  async function bind(entry: ManagedSession) {
+    entry.notices = [];
+    await bindExtensionUI(entry.session, (text) => {
+      if (entry.active?.notify) entry.active.notify(text);
+      else entry.notices!.push(text);
+    });
+  }
   async function dispose(entry: ManagedSession) {
     if (entry.active) {
       entry.active.cancelled = true;
       entry.active.unsubscribe();
-      void entry.session.abort().catch(() => {});
+      const settled = entry.active.settled;
+      await entry.session.abort().catch(() => {});
+      // Reload cannot be interrupted; dispose its replacement runner, not the old one.
+      await settled;
     }
     try { await shutdownSession(entry.session); }
     finally { entry.session.dispose(); }
@@ -79,14 +94,16 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         throw new RequestError(-32603, "Connection closed");
       }
       const sessionId = randomUUID();
+      const entry: ManagedSession = { session, cwd: params.cwd };
       try {
+        await bind(entry);
         if (session.sessionFile) await index.set(sessionId, { cwd: params.cwd, sessionFile: session.sessionFile });
         if (closed) throw new Error("Connection closed");
         if (session.resourceLoader) await client.sessionUpdate({ sessionId, update: {
           sessionUpdate: "available_commands_update", availableCommands: availableCommands(session),
         } });
         if (closed) throw new Error("Connection closed");
-        sessions.set(sessionId, { session, cwd: params.cwd });
+        sessions.set(sessionId, entry);
         return { sessionId, configOptions: modelConfigOptions(session) };
       } catch {
         sessions.delete(sessionId);
@@ -106,8 +123,10 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         if (!record || record.cwd !== cwd) throw RequestError.invalidParams("Unknown session or workspace mismatch");
         session = await createSession(cwd, record.sessionFile, params.mcpServers);
         if (closed) throw new Error("Connection closed");
+        const entry: ManagedSession = { session, cwd };
+        await bind(entry);
         for (const update of replayHistory(session)) {
-          let presented = update;
+          let presented = await toolImageLinks(update, artifactDir);
           if (update.sessionUpdate === "agent_message_chunk") {
             if (update.content.type === "image") presented = { ...update, content: await imageLink(update.content, artifactDir) };
             else if (update.content.type === "text") {
@@ -121,7 +140,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           sessionUpdate: "available_commands_update", availableCommands: availableCommands(session),
         } });
         if (closed) throw new Error("Connection closed");
-        sessions.set(sessionId, { session, cwd });
+        sessions.set(sessionId, entry);
         return { configOptions: modelConfigOptions(session) };
       } catch (error) {
         if (session) await dispose({ session, cwd });
@@ -150,8 +169,11 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     async prompt(params) {
       const entry = getSession(params.sessionId);
       if (entry.active || entry.changingModel) throw new RequestError(-32600, "Session is busy");
+      const command = parseBridgeCommand(params.prompt);
       const { text, images } = decodePrompt(params.prompt);
-      const active: ActivePrompt = { cancelled: false, unsubscribe: () => {} };
+      let finish!: () => void;
+      const settled = new Promise<void>((resolve) => { finish = resolve; });
+      const active: ActivePrompt = { cancelled: false, unsubscribe: () => {}, settled };
       entry.active = active;
       let stopReason: StopReason = "end_turn";
       let failed = false;
@@ -168,9 +190,20 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           } });
         }).catch(() => { deliveryFailed = true; });
       }
+      active.notify = enqueueText;
+      for (const notice of entry.notices?.splice(0) ?? []) enqueueText(notice);
       try {
         active.unsubscribe = entry.session.subscribe((event) => {
           if (active.cancelled) return;
+          if (event.type === "compaction_start") {
+            enqueueText(`正在压缩上下文（${event.reason === "manual" ? "手动" : event.reason === "overflow" ? "上下文超限，准备重试" : "接近上下文上限"}）……\n`);
+          } else if (event.type === "compaction_end") {
+            enqueueText(event.result
+              ? `压缩完成：${event.result.tokensBefore} → 约 ${event.result.estimatedTokensAfter ?? "未知"} token。${event.willRetry ? "继续处理当前请求。" : ""}\n`
+              : event.aborted ? "上下文压缩已取消。\n" : "上下文压缩未完成。\n");
+          } else if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") {
+            enqueueText(`请求暂时失败，准备重试（${event.attempt}/${event.maxAttempts}，约 ${Math.ceil(event.delayMs / 1000)} 秒后）。\n`);
+          }
           if (event.type === "message_update" && (
             event.assistantMessageEvent.type === "text_delta" || event.assistantMessageEvent.type === "thinking_delta"
           )) {
@@ -181,20 +214,10 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           }
           for (const update of toolUpdates(event)) {
             updates = updates.then(async () => {
-              if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update });
+              if (active.cancelled) return;
+              const presented = await toolImageLinks(update, artifactDir);
+              if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update: presented });
             }).catch(() => { deliveryFailed = true; });
-          }
-          if (event.type === "tool_execution_end") {
-            for (const block of event.result.content ?? []) {
-              if (block.type !== "image") continue;
-              updates = updates.then(async () => {
-                if (active.cancelled) return;
-                const link = await imageLink(block, artifactDir);
-                if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update: {
-                  sessionUpdate: "agent_message_chunk", content: link,
-                } });
-              }).catch(() => { deliveryFailed = true; });
-            }
           }
           if (event.type === "message_end" && event.message.role === "assistant") {
             enqueueText(imageLinks.finish());
@@ -203,20 +226,49 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
               : event.message.stopReason === "length" ? "max_tokens" : "end_turn";
           }
         });
-        if (images.length) await entry.session.prompt(text, { images });
+        if (command?.name === "session") {
+          enqueueText(sessionReport(entry.session, params.sessionId, entry.cwd));
+        } else if (command?.name === "reload") {
+          if (!entry.session.reload) throw RequestError.invalidParams("Reload unavailable");
+          enqueueText("正在重新加载扩展、技能与模板……\n");
+          await entry.session.reload();
+          enqueueText("重新加载完成；当前聊天历史未切换。\n");
+          updates = updates.then(async () => {
+            if (active.cancelled) return;
+            await client.sessionUpdate({ sessionId: params.sessionId, update: {
+              sessionUpdate: "available_commands_update", availableCommands: availableCommands(entry.session),
+            } });
+            await client.sessionUpdate({ sessionId: params.sessionId, update: {
+              sessionUpdate: "config_option_update", configOptions: modelConfigOptions(entry.session),
+            } });
+          }).catch(() => { deliveryFailed = true; });
+        } else if (command?.name === "compact") {
+          if (!entry.session.compact) throw RequestError.invalidParams("Compaction unavailable");
+          await entry.session.compact(command.args);
+        } else if (images.length) await entry.session.prompt(text, { images });
         else await entry.session.prompt(text);
         enqueueText(imageLinks.finish());
         await updates;
         if (active.cancelled) return { stopReason: "cancelled" as const };
         if (failed || deliveryFailed) throw new Error("Prompt failed");
         return { stopReason };
-      } catch {
+      } catch (error) {
         if (active.cancelled) return { stopReason: "cancelled" as const };
-        throw new RequestError(-32603, "Pi prompt failed; check model configuration and credentials");
+        if (command?.name === "compact" && error instanceof Error) {
+          if (error.message === "Compaction cancelled") return { stopReason: "cancelled" as const };
+          if (["Already compacted", "Nothing to compact (session too small)"].includes(error.message)) {
+            enqueueText("当前没有需要压缩的历史；可以继续对话。\n");
+            await updates;
+            if (!deliveryFailed) return { stopReason: "end_turn" as const };
+          }
+        }
+        if (error instanceof RequestError) throw error;
+        throw new RequestError(-32603, command ? `Pi /${command.name} failed; check Pi configuration or extension compatibility` : "Pi prompt failed; check model configuration and credentials");
       } finally {
         active.unsubscribe();
         await updates;
         if (entry.active === active) entry.active = undefined;
+        finish();
       }
     },
     async cancel({ sessionId }) {

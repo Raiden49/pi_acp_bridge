@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, test, vi } from "vitest";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { protocolHarness } from "./protocol-harness.js";
@@ -30,7 +30,7 @@ test("passes inline and file-linked images to Pi and advertises vision support",
   } finally { await client.close(); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test("keeps native tool images but presents assistant images as readable absolute links", async () => {
+test("keeps native tool images with navigable artifacts and normalizes model-authored image links", async () => {
   await mkdir(".scratch", { recursive: true });
   const artifactDir = await mkdtemp(resolve(".scratch/artifacts with space-"));
   let listener: Parameters<AgentSession["subscribe"]>[0] = () => {};
@@ -49,13 +49,14 @@ test("keeps native tool images but presents assistant images as readable absolut
     expect(await client.request("session/prompt", { sessionId, prompt: [] })).toHaveProperty("result");
     const tool = (await client.nextNotification()).params.update;
     expect(tool.content[0]).toEqual({ type: "content", content: { type: "image", data: png, mimeType: "image/png" } });
-    const update = (await client.nextNotification()).params.update;
-    expect(update).toMatchObject({ sessionUpdate: "agent_message_chunk", content: { type: "text" } });
-    expect(update.content.text).not.toContain(png);
-    const uri = update.content.text.match(/\]\((file:\/\/\/[^)]+)\)/)?.[1];
+    const link = tool.content[1]?.content;
+    expect(link?.type).toBe("text");
+    expect(link.text).not.toContain(png);
+    const uri = link.text.match(/\]\((file:\/\/\/[^)]+)\)/)?.[1];
     expect(uri).toContain("artifacts%20with%20space-");
     expect(await readFile(new URL(uri!))).toEqual(Buffer.from(png, "base64"));
-    expect(update.content.text).toContain(artifactDir);
+    expect(link.text).toContain(artifactDir);
+    expect(tool.locations).toEqual(expect.arrayContaining([{ path: fileURLToPath(uri!) }]));
     expect((await client.nextNotification()).params.update.content).toEqual({
       type: "text", text: "[robot](file:///tmp/robot.jpg)",
     });

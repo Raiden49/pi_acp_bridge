@@ -2,15 +2,16 @@ import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { BridgeSession } from "./sessions.js";
 
 export function* replayHistory(session: BridgeSession): Generator<SessionUpdate> {
-  for (const message of session.messages ?? []) {
+  // Model context is compacted; the chat transcript must retain earlier turns.
+  const messages = session.sessionManager
+    ? session.sessionManager.getBranch().flatMap((entry) => entry.type === "message" ? [entry.message] : [])
+    : session.messages ?? [];
+  for (const message of messages) {
     if (message.role === "toolResult") {
       yield { sessionUpdate: "tool_call_update", toolCallId: message.toolCallId,
         status: message.isError ? "failed" : "completed",
         content: message.content.map((content) => ({ type: "content", content })),
       };
-      for (const content of message.content) {
-        if (content.type === "image") yield { sessionUpdate: "agent_message_chunk", content };
-      }
     } else if (message.role === "user" || message.role === "assistant") {
       const blocks = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
       for (const content of blocks) {

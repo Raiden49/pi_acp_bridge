@@ -1,8 +1,56 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { protocolHarness } from "./protocol-harness.js";
+
+test("/session reports session state without sending a model prompt", async () => {
+  const prompt = vi.fn(async () => { throw new Error("Model must not be called"); });
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => ({
+    prompt, subscribe: () => () => {}, abort: async () => {}, dispose() {},
+    getSessionStats: () => ({ sessionId: "pi-session", sessionFile: "/workspace/history.jsonl", userMessages: 4,
+      assistantMessages: 4, toolCalls: 2, toolResults: 2, totalMessages: 10,
+      tokens: { input: 500, output: 100, cacheRead: 20, cacheWrite: 0, total: 620 }, cost: 0.01 }),
+  }) });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace", mcpServers: [] })).result;
+    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/session" }] }))
+      .toMatchObject({ result: { stopReason: "end_turn" } });
+    const { update } = (await client.nextNotification()).params;
+    expect(update.content.text).toContain("pi-session");
+    expect(update.content.text).toContain("620");
+    for (const blocks of [
+      [{ type: "text", text: "/session unexpected" }],
+      [{ type: "text", text: "/reload" }, { type: "resource", resource: { uri: "file:///context.txt", text: "Context" } }],
+    ]) expect(await client.request("session/prompt", { sessionId, prompt: blocks })).toMatchObject({ error: { code: -32602 } });
+    expect(prompt).not.toHaveBeenCalled();
+  } finally { await client.close(); }
+});
+
+test("closing during reload waits for replacement resources before disposing them", async () => {
+  let finishReload!: () => void;
+  let abortStarted!: () => void;
+  const reloading = new Promise<void>((resolve) => { finishReload = resolve; });
+  const aborting = new Promise<void>((resolve) => { abortStarted = resolve; });
+  let resourceOpen = false;
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => ({
+    prompt: async () => {}, subscribe: () => () => {}, abort: async () => { abortStarted(); },
+    reload: async () => { await reloading; resourceOpen = true; }, dispose: () => { resourceOpen = false; },
+  }) });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace", mcpServers: [] })).result;
+    const prompt = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/reload" }] });
+    await client.nextNotification();
+    const closing = client.request("session/close", { sessionId });
+    await aborting;
+    // Let close settle if it incorrectly disposes before reload completes.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    finishReload();
+    expect(await prompt).toMatchObject({ result: { stopReason: "cancelled" } });
+    await closing;
+    expect(resourceOpen).toBe(false);
+  } finally { finishReload(); await client.close(); }
+});
 
 test.each([true, false])("advertises loaded prompt templates, extensions and enabled skills: %s", async (enableSkillCommands) => {
   await mkdir(".scratch", { recursive: true });
@@ -17,7 +65,8 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
   const client = protocolHarness(resolve(agentDir, "models.json"), { async createSession() {
     const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
       noThemes: true, extensionFactories: [(pi) => {
-        pi.registerCommand("hello", { description: "Say hello", handler: async () => {} });
+        pi.registerCommand("hello", { description: "Say hello", handler: async (_args, ctx) => { ctx.ui.notify(ctx.ui.theme.fg("accent", "Hello from extension")); } });
+        pi.registerCommand("terminal", { handler: async (_args, ctx) => { await ctx.ui.confirm("Confirm", "Terminal dialog"); } });
       }],
     });
     await resourceLoader.reload();
@@ -35,5 +84,22 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
     ]));
     expect(commands.some((command: { name: string }) => command.name === "skill:review")).toBe(enableSkillCommands);
     expect(commands.some((command: { name: string }) => command.name === "quit")).toBe(false);
+    expect(commands.map((command: { name: string }) => command.name)).toEqual(expect.arrayContaining(["session", "reload", "compact"]));
+    if (enableSkillCommands) {
+      await writeFile(resolve(agentDir, "prompts/new-template.md"), "---\ndescription: Newly loaded\n---\nNew template");
+      expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/reload" }] }))
+        .toMatchObject({ result: { stopReason: "end_turn" } });
+      let refreshed;
+      for (;;) {
+        const update = (await client.nextNotification()).params.update;
+        if (update.sessionUpdate === "available_commands_update") refreshed = update.availableCommands;
+        if (update.sessionUpdate === "config_option_update") break;
+      }
+      expect(refreshed).toContainEqual({ name: "new-template", description: "Newly loaded" });
+      await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/hello" }] });
+      expect((await client.nextNotification()).params.update.content.text).toBe("Hello from extension\n");
+      await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/terminal" }] });
+      expect((await client.nextNotification()).params.update.content.text).toContain("Pi CLI");
+    }
   } finally { await client.close(); await rm(cwd, { recursive: true, force: true }); }
 });

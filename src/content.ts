@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RequestError, type ContentBlock } from "@agentclientprotocol/sdk";
+import { RequestError, type ContentBlock, type SessionUpdate } from "@agentclientprotocol/sdk";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 type Image = NonNullable<NonNullable<Parameters<AgentSession["prompt"]>[1]>["images"]>[number];
@@ -30,7 +30,7 @@ export function decodePrompt(blocks: ContentBlock[]) {
   return { text: text.join("\n"), images };
 }
 
-export async function imageLink(image: Image, artifactDir: string): Promise<ContentBlock> {
+async function saveImage(image: Image, artifactDir: string) {
   const bytes = Buffer.from(image.data, "base64");
   const extension = ({ "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" } as Record<string, string>)[image.mimeType] ?? "img";
   const name = `${createHash("sha256").update(bytes).digest("hex")}.${extension}`;
@@ -40,5 +40,20 @@ export async function imageLink(image: Image, artifactDir: string): Promise<Cont
   // Some ACP clients stringify non-text assistant chunks, exposing image base64.
   // Keep native images in tool results; present a portable file link in chat.
   const uri = pathToFileURL(path).href;
-  return { type: "text", text: `\n\n[打开图片](${uri})\n\n图片文件：\`${fileURLToPath(uri)}\`\n\n` };
+  return { path, link: { type: "text" as const, text: `\n\n[打开图片](${uri})\n\n图片文件：\`${fileURLToPath(uri)}\`\n\n` } };
+}
+
+export async function imageLink(image: Image, artifactDir: string): Promise<ContentBlock> {
+  return (await saveImage(image, artifactDir)).link;
+}
+
+export async function toolImageLinks(update: SessionUpdate, artifactDir: string): Promise<SessionUpdate> {
+  if (update.sessionUpdate !== "tool_call_update" || !["completed", "failed"].includes(update.status ?? "")) return update;
+  const images = (update.content ?? []).flatMap((block) => block.type === "content" && block.content.type === "image" ? [block.content] : []);
+  if (!images.length) return update;
+  const artifacts = await Promise.all(images.map((image) => saveImage(image, artifactDir)));
+  return { ...update,
+    content: [...update.content ?? [], ...artifacts.map(({ link }) => ({ type: "content" as const, content: link }))],
+    locations: [...update.locations ?? [], ...artifacts.map(({ path }) => ({ path }))],
+  };
 }

@@ -2,16 +2,19 @@ import { stat, writeFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { RequestError, type McpServer } from "@agentclientprotocol/sdk";
-import { clientMcpExtension, shutdownSession } from "./client-mcp.js";
+import { clientMcpExtension } from "./client-mcp.js";
 
 export type BridgeSession = Pick<AgentSession, "prompt" | "subscribe" | "abort" | "dispose"> &
-  Partial<Pick<AgentSession, "sessionFile" | "messages" | "resourceLoader" | "promptTemplates" | "settingsManager" | "extensionRunner" | "model" | "modelRuntime" | "setModel">>;
+  Partial<Pick<AgentSession, "sessionFile" | "sessionManager" | "messages" | "resourceLoader" | "promptTemplates" | "settingsManager" | "extensionRunner" | "model" | "modelRuntime" | "setModel" | "getSessionStats" | "reload" | "compact" | "bindExtensions">>;
 
 export function availableCommands(session: BridgeSession) {
   const commands = new Map<string, { name: string; description: string }>();
   const add = (name: string, description = "") => {
     if (!commands.has(name)) commands.set(name, { name, description });
   };
+  if (session.getSessionStats) add("session", "显示当前会话、历史路径与用量统计");
+  if (session.reload) add("reload", "重新加载扩展、技能与模板（不刷新聊天历史）");
+  if (session.compact) add("compact", "压缩当前上下文；可附加摘要要求，会调用模型");
   for (const command of session.extensionRunner?.getRegisteredCommands() ?? []) add(command.invocationName, command.description);
   for (const template of session.promptTemplates ?? []) add(template.name, template.description);
   if (session.settingsManager?.getEnableSkillCommands()) {
@@ -42,12 +45,5 @@ export async function createWorkspaceSession(cwd: string, sessionFile?: string, 
   }) : undefined;
   if (resourceLoader) await resourceLoader.reload();
   const { session } = await createAgentSession({ cwd, sessionManager, resourceLoader });
-  try {
-    if (mcpServers.length) await session.bindExtensions({});
-    return session;
-  } catch (error) {
-    try { await shutdownSession(session); }
-    finally { session.dispose(); }
-    throw error;
-  }
+  return session;
 }

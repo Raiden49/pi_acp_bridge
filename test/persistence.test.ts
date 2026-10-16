@@ -60,9 +60,9 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
     expect(history).toEqual(expect.arrayContaining([
       { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `[robot](file://${cwd}/robot.png)` } },
       expect.objectContaining({ sessionUpdate: "tool_call_update", toolCallId: "read-image" }),
-      expect.objectContaining({ sessionUpdate: "agent_message_chunk", content: {
-        type: "text", text: expect.stringContaining("[打开图片](file:///"),
-      } }),
+      expect.objectContaining({ sessionUpdate: "tool_call_update", content: expect.arrayContaining([
+        { type: "content", content: { type: "text", text: expect.stringContaining("[打开图片](file:///") } },
+      ]) }),
     ]));
     expect(await client.request("session/load", { sessionId, cwd, mcpServers: [] }))
       .toMatchObject({ error: { code: -32600 } });

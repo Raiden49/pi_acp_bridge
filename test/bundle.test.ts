@@ -117,6 +117,22 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-image" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });
       expect(await readFile(resolve(root, "image-success"), "utf8").catch(() => "not-processed")).toBe("ok");
+      expect(commands?.params.update.availableCommands.map((command: { name: string }) => command.name))
+        .toEqual(expect.arrayContaining(["session", "reload", "compact"]));
+      expect(await request(5, "session/prompt", {
+        sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/session" }],
+      })).toMatchObject({ result: { stopReason: "end_turn" } });
+      expect(messages.some((message) => message.params?.update?.content?.text?.includes("Pi 会话"))).toBe(true);
+      expect(await request(6, "session/prompt", {
+        sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/reload" }],
+      })).toMatchObject({ result: { stopReason: "end_turn" } });
+      expect(() => process.kill(Number(pid), 0)).toThrow();
+      const previousPid = pid;
+      for (let attempt = 0; attempt < 50 && pid === previousPid; attempt++) {
+        pid = await readFile(pidFile, "utf8");
+        if (pid === previousPid) await delay(10);
+      }
+      expect(pid).not.toBe(previousPid);
       child.child.kill("SIGTERM");
       await child;
       expect(() => process.kill(Number(pid), 0)).toThrow();
