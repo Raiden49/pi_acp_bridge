@@ -36,6 +36,10 @@
 
 若 Diff 未出现，确认工具为 `edit` 或 `write` 且真的改变了文件；bash 任意文件变更不在当前 Diff 捕获范围内。若无法连接，检查绝对路径、构建产物和 Air 日志；不要向桥接器 stdout 添加诊断输出，因为该流只用于 ACP。
 
+## 待处理：偶尔手动交接历史
+
+用户仅需排错时在 IDE 与 Pi 终端间手动接续，不需要双向实时同步或常驻服务。后续验证“退出终端 → Air 恢复原聊天”能否重新加载历史与上下文；暂不实现自动刷新。
+
 ## Air 注入的 MCP
 
 Air 的实际聊天会向 `session/new` 注入 MCP 服务，即使它探测模型列表时传入的是空列表。桥接器现支持这些 stdio / Streamable HTTP 配置：由 Pi 官方 MCP 扩展发现并执行工具，直接提供给模型；配置不写回全局文件。恢复会话采用新客户端的 MCP 参数，关闭/断线释放连接，SIGTERM/SIGINT 也先清理 MCP 子进程再退出。
@@ -43,6 +47,8 @@ Air 的实际聊天会向 `session/new` 注入 MCP 服务，即使它探测模�
 只有真实 MCP 工具调用成功才证明端到端连接正常；列表探测成功或会话创建成功本身不证明这一点。旧式 SSE、ACP 内嵌 MCP 和 MCP OAuth 界面不在当前支持范围。
 
 ## 已定位的集成故障
+
+- 图片提示返回“大小限制”，但原图仅约 912 KiB、1254×1254：Pi 在 Photon 加载失败时也返回 `[Image omitted: could not be resized below the inline image size limit.]`。生产构建现将 Photon WASM 压缩内嵌，避免依赖 bundle 外的文件；SDK 的 resize worker 不存在时使用官方进程内回退。独立 bundle 图片处理回归通过，并用该原图完成无模型请求验证。macOS 浮动截图拖入后、ACP 提示尚未到达的卡住问题尚未确认解决。
 
 - OpenAI OAuth 模型可展示、可选择，但提示返回统一错误：会话 JSONL 中实际为 `OAuth auth derivation failed ... Cannot find module .../dist/openai-chatgpt.js`。Pi 的 OAuth loader 使用变量动态导入，单文件构建无法自动收集模块；CLI 现注册 Pi 官方静态 OAuth loaders（导出名为 `registerBunOAuthFlows`，同样适用于 Node）。bundle 回归用临时假凭据实际执行 `ModelRuntime.getAuth('openai')`，禁止网络与外部模块加载，不接触用户认证。
 

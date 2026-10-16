@@ -28,11 +28,17 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
     } }));
     await writeFile(resolve(agentDir, "extensions/provider.ts"), `
       import { Type } from '@sinclair/typebox';
-      import { ModelRuntime } from '@earendil-works/pi-coding-agent';
+      import { ModelRuntime, resizeImage } from '@earendil-works/pi-coding-agent';
       import { writeFileSync } from 'node:fs';
       export default function (pi) {
         const schema = Type.String();
         pi.registerCommand('bundle-extension', { description: schema.type, handler: async () => {} });
+        pi.registerCommand('bundle-image', { description: 'Verify bundled image processing', handler: async () => {
+          const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
+          const result = await resizeImage(bytes, 'image/png');
+          if (!result || result.width !== 1 || result.height !== 1) throw new Error('Image processing failed');
+          writeFileSync(${JSON.stringify(resolve(root, "image-success"))}, 'ok');
+        } });
         pi.registerCommand('bundle-oauth', { description: 'Verify bundled OAuth', handler: async () => {
           const runtime = await ModelRuntime.create({ authPath: ${JSON.stringify(oauthPath)},
             modelsPath: ${JSON.stringify(resolve(root, "absent-models.json"))},
@@ -107,6 +113,10 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-oauth" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });
       expect(await readFile(resolve(root, "oauth-success"), "utf8").catch(() => "not-derived")).toBe("ok");
+      expect(await request(4, "session/prompt", {
+        sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-image" }],
+      })).toMatchObject({ result: { stopReason: "end_turn" } });
+      expect(await readFile(resolve(root, "image-success"), "utf8").catch(() => "not-processed")).toBe("ok");
       child.child.kill("SIGTERM");
       await child;
       expect(() => process.kill(Number(pid), 0)).toThrow();
