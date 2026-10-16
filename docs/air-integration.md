@@ -36,10 +36,16 @@
 
 若 Diff 未出现，确认工具为 `edit` 或 `write` 且真的改变了文件；bash 任意文件变更不在当前 Diff 捕获范围内。若无法连接，检查绝对路径、构建产物和 Air 日志；不要向桥接器 stdout 添加诊断输出，因为该流只用于 ACP。
 
+## 已定位的集成故障
+
+- 单文件构建必须定义 `PI_BUNDLED_NODE=true`。Pi SDK 据此使用内嵌虚拟模块和 `jiti/static` 加载扩展；否则初始化仍成功，但文件型扩展会因 `Cannot find module 'typebox'` 全部失效，扩展提供商（例如 `pi-antigravity`）也会从模型下拉框消失。不能仅用初始化握手证明生产 bundle 支持 Pi 配置。
+- Air 日志出现 `Cannot insert duplicate value AgentId(...)`，随后出现 `Failed to obtain agent frontend provider` 时，提交动作会在 IDE 前端失败，桥接器收不到 `session/prompt`。这不证明用户选错代理，也不证明模型服务未响应。可在用户授权后换一个临时代理名称验证是否能绕开该注册状态，不应擅自清空聊天或缓存。本次诊断暂用 `Pi-Bridge (Check)`，保留脱敏跟踪入口；真实聊天仍待验证。
+- Pi 的默认提供商与认证提供商是不同配置。如果旧设置指定 `openai-codex/gpt-5.5`，但认证仅属于 `openai`，SDK 可能回退到 `openai/gpt-5.5`。桥接器不自动迁移、复制认证或改写用户默认设置。
+
 ## 自动化证据
 
 - `pnpm run build`：生成压缩 bundle，保留可执行 shebang。
-- `pnpm exec vitest run test/bundle.test.ts`：真实子进程握手，禁止外部模块加载，无模型网络请求。
+- `pnpm exec vitest run test/bundle.test.ts`：真实子进程握手及创建会话，禁止外部模块加载；验证文件型 TypeScript 扩展可导入 TypeBox、注册命令与提供商，并出现在模型选择器中，无模型网络请求。
 - `pnpm exec vitest run test/models.test.ts`：真实 Pi 会话经 ACP 切换，确定性模型流证明下一次提示使用新模型，其他会话不变。
 - `test/persistence.test.ts`：恢复会话继续提供模型配置；`test/sessions.test.ts`：活动提示期间拒绝切换。
 

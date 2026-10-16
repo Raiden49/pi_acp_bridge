@@ -85,7 +85,7 @@ Pi 在桥接器进程内自主执行已启用工具，不额外请求 ACP 权限
 
 `test/protocol-harness.ts` 用 `duplexPair()` 创建双向内存流，连接与 CLI 相同的 `startServer()`；测试仅收发带换行的 JSON-RPC，不查看 handler 或 Pi 的私有状态，不调用模型网络服务。
 
-`test/bundle.test.ts` 构建压缩单文件产物，检查 shebang 与 10 MB 体积预算，并启动禁止加载外部模块的真实 Node 进程进行 stdio 握手；进程 stdin 关闭后必须在超时内退出。此测试不调用真实模型或 IDE。
+`test/bundle.test.ts` 构建压缩单文件产物，检查 shebang 与 10 MB 体积预算，并启动禁止加载外部模块的真实 Node 进程进行 stdio 握手；进程 stdin 关闭后必须在超时内退出。同时经 `session/new` 验证用户目录的 TypeScript 扩展能使用内嵌 TypeBox、注册命令与可用模型提供商。生产构建设置 `PI_BUNDLED_NODE=true`，确保 Pi 使用内嵌模块加载扩展，而非依赖原始 SDK 安装路径。此测试不调用真实模型或 IDE。
 
 `test/models.test.ts` 使用真实 Pi 会话，仅替换模型网络流，经 ACP 验证原生下拉框、切换后提示实际使用所选模型、其他会话不受影响，以及未认证模型不展示且不可选择、未知模型/配置项拒绝；恢复时的配置广告由持久化测试覆盖。内存协议测试结束时显式关闭双向流的两个写端，兼容 Node 22 的 half-open 行为。
 
