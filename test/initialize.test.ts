@@ -75,9 +75,9 @@ test("invalid model configuration returns an actionable protocol error without l
   expect(JSON.stringify(response)).not.toContain("secret-token");
 });
 
-test("unimplemented sessions are explicitly rejected", async () => {
+test("unimplemented authentication is explicitly rejected", async () => {
   const client = await fixture();
   await client.request("initialize", params);
-  expect(await client.request("session/new", { cwd: process.cwd(), mcpServers: [] }))
+  expect(await client.request("authenticate", { methodId: "unsupported" }))
     .toMatchObject({ error: { code: -32601 } });
 });

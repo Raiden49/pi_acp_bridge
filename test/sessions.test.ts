@@ -1,0 +1,121 @@
+import { expect, test, vi } from "vitest";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { protocolHarness } from "./protocol-harness.js";
+
+test("routes concurrent workspace sessions, streams before completion, and releases listeners", async () => {
+  const sessions: Array<ReturnType<typeof fakeSession>> = [];
+  const client = protocolHarness(".scratch/absent-models.json", {
+    async createSession(cwd) {
+      const session = fakeSession(cwd);
+      sessions.push(session);
+      return session;
+    },
+  });
+  try {
+    const [a, b] = await Promise.all(["/workspace/a", "/workspace/b"].map(async (cwd) =>
+      (await client.request("session/new", { cwd, mcpServers: [] })).result.sessionId as string));
+    expect(a).not.toBe(b);
+    const pa = client.request("session/prompt", { sessionId: a, prompt: [{ type: "text", text: "A" }] });
+    expect((await client.nextNotification()).params).toEqual({
+      sessionId: a, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "/workspace/a:A" } },
+    });
+    const pb = client.request("session/prompt", { sessionId: b, prompt: [{ type: "text", text: "B" }] });
+    expect((await client.nextNotification()).params.sessionId).toBe(b);
+    expect(await client.request("session/prompt", { sessionId: a, prompt: [{ type: "text", text: "overlap" }] }))
+      .toMatchObject({ error: { code: -32600 } });
+    sessions[0]!.finish();
+    expect(await pa).toMatchObject({ result: { stopReason: "end_turn" } });
+    expect(sessions[0]!.listeners.size).toBe(0);
+    await client.request("session/close", { sessionId: b });
+    expect(await pb).toMatchObject({ result: { stopReason: "cancelled" } });
+    expect(sessions[1]!.dispose).toHaveBeenCalledOnce();
+    expect(sessions[1]!.listeners.size).toBe(0);
+    expect(await client.request("session/prompt", { sessionId: b, prompt: [] }))
+      .toMatchObject({ error: { code: -32602 } });
+  } finally {
+    await client.close();
+  }
+  expect(sessions[0]!.dispose).toHaveBeenCalledOnce();
+});
+
+test("cancel stops an active prompt without closing the session", async () => {
+  const session = fakeSession("/workspace/a");
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => session });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
+    const prompt = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] });
+    await client.nextNotification();
+    client.notify("session/cancel", { sessionId });
+    expect(await prompt).toMatchObject({ result: { stopReason: "cancelled" } });
+    expect(session.dispose).not.toHaveBeenCalled();
+    expect(session.listeners.size).toBe(0);
+  } finally { await client.close(); }
+});
+
+test("prompt errors remove subscriptions, redact details, and allow retry", async () => {
+  const session = fakeSession("/workspace/a");
+  const prompt = vi.spyOn(session, "prompt").mockRejectedValueOnce(new Error("secret-provider-detail"));
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => session });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
+    const response = await client.request("session/prompt", {
+      sessionId, prompt: [{ type: "text", text: "first" }, { type: "text", text: "second" }],
+    });
+    expect(response).toMatchObject({ error: { code: -32603 } });
+    expect(JSON.stringify(response)).not.toContain("secret-provider-detail");
+    expect(prompt).toHaveBeenCalledWith("first\nsecond");
+    expect(session.listeners.size).toBe(0);
+    const retry = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "retry" }] });
+    await client.nextNotification();
+    session.finish();
+    expect(await retry).toMatchObject({ result: { stopReason: "end_turn" } });
+  } finally { await client.close(); }
+});
+
+test("disconnect during a prompt disposes the session and detaches listeners", async () => {
+  const session = fakeSession("/workspace/a");
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => session });
+  const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
+  void client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] });
+  await client.nextNotification();
+  await client.close();
+  expect(session.listeners.size).toBe(0);
+  expect(session.dispose).toHaveBeenCalledOnce();
+});
+
+test("rejects unsupported inputs before invoking Pi", async () => {
+  const session = fakeSession("/workspace/a");
+  const createSession = vi.fn(async () => session);
+  const client = protocolHarness(".scratch/absent-models.json", { createSession });
+  try {
+    expect(await client.request("session/new", { cwd: "relative", mcpServers: [] }))
+      .toMatchObject({ error: { code: -32602 } });
+    expect(createSession).not.toHaveBeenCalled();
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
+    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "image", mimeType: "image/png", data: "AA==" }] }))
+      .toMatchObject({ error: { code: -32602 } });
+    expect(session.listeners.size).toBe(0);
+  } finally { await client.close(); }
+});
+
+function fakeSession(cwd: string) {
+  const listeners = new Set<Parameters<AgentSession["subscribe"]>[0]>();
+  let finish = () => {};
+  return {
+    listeners,
+    finish: () => finish(),
+    subscribe(listener: Parameters<AgentSession["subscribe"]>[0]) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    async prompt(text: string) {
+      const done = new Promise<void>((resolve) => { finish = resolve; });
+      // Only the event envelope used by the bridge is needed at this boundary.
+      const event = { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `${cwd}:${text}` } };
+      for (const listener of listeners) listener(event as Parameters<typeof listener>[0]);
+      await done;
+    },
+    abort: vi.fn(async () => finish()),
+    dispose: vi.fn(() => finish()),
+  };
+}
