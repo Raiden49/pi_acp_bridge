@@ -4,7 +4,7 @@ import { createAgentSession, SessionManager, type AgentSession } from "@earendil
 import { RequestError } from "@agentclientprotocol/sdk";
 
 export type BridgeSession = Pick<AgentSession, "prompt" | "subscribe" | "abort" | "dispose"> &
-  Partial<Pick<AgentSession, "sessionFile" | "messages" | "resourceLoader" | "promptTemplates" | "settingsManager" | "extensionRunner">>;
+  Partial<Pick<AgentSession, "sessionFile" | "messages" | "resourceLoader" | "promptTemplates" | "settingsManager" | "extensionRunner" | "model" | "modelRuntime" | "setModel">>;
 
 export function availableCommands(session: BridgeSession) {
   const commands = new Map<string, { name: string; description: string }>();

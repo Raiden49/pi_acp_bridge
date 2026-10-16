@@ -31,7 +31,7 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
   } };
   let client = protocolHarness(resolve(agentDir, "models.json"), options);
   try {
-    const { sessionId } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    const { sessionId, configOptions } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
     const index = JSON.parse(await readFile(sessionIndexPath, "utf8"));
     expect(index[sessionId]).toMatchObject({ cwd });
     expect(await readFile(index[sessionId].sessionFile, "utf8")).toContain("Remember this");
@@ -39,7 +39,8 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
     client = protocolHarness(resolve(agentDir, "models.json"), options);
     expect(await client.request("session/load", { sessionId, cwd: resolve(cwd, "other"), mcpServers: [] }))
       .toMatchObject({ error: { code: -32602 } });
-    expect(await client.request("session/load", { sessionId, cwd, mcpServers: [] })).toHaveProperty("result");
+    expect(await client.request("session/load", { sessionId, cwd, mcpServers: [] }))
+      .toMatchObject({ result: { configOptions } });
     expect((await client.nextNotification()).params).toEqual({ sessionId, update: {
       sessionUpdate: "user_message_chunk", content: { type: "text", text: "Remember this" },
     } });

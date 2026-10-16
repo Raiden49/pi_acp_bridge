@@ -7,6 +7,7 @@ export default defineConfig({
   target: "node22",
   clean: true,
   splitting: false,
+  minify: true,
   banner: { js: 'import { createRequire as createBundleRequire } from "node:module"; const require = createBundleRequire(import.meta.url);' },
   noExternal: [/.*/],
 });

@@ -18,14 +18,16 @@ node dist/index.js
 
 安装显式跳过依赖生命周期脚本；当前握手、测试和打包无需这些脚本。依赖只安装到项目本地，不使用全局安装。
 
-构建输出为单文件 ESM bundle `dist/index.js`，带 CLI shebang，可通过 `node /absolute/path/to/dist/index.js` 启动。标准输出仅用于 ACP 消息，不用于日志。
+构建输出为压缩后的单文件 ESM bundle `dist/index.js`，带 CLI shebang，无需相邻 `node_modules` 即可启动，可通过 `node /absolute/path/to/dist/index.js` 启动。标准输出仅用于 ACP 消息，不用于日志。
 
-模型发现默认读取 `~/.pi/agent/models.json`，也支持 Pi 的 `PI_CODING_AGENT_DIR`。无需凭据或模型 API 请求即可完成初始化。模型列表通过 `_meta["pi-acp-bridge/models"]` 扩展返回，不等同于 IDE 原生模型选择支持。
+模型发现默认读取 `~/.pi/agent/models.json`，也支持 Pi 的 `PI_CODING_AGENT_DIR`。无需凭据或模型 API 请求即可完成初始化。初始化模型列表通过 `_meta["pi-acp-bridge/models"]` 扩展返回；创建及恢复会话通过标准 `configOptions` 提供 IDE 原生模型下拉框，使用 `session/set_config_option` 在空闲时切换当前会话模型。目录不按凭据过滤，选择模型仍需要有效的 Pi 凭据。
 
 会话使用 Pi 的独立 JSONL 历史，ACP ID 与文件路径保存在 `~/.pi/agent/acp-sessions.json`（遵循 `PI_CODING_AGENT_DIR`）。关闭或断开后，可以用原 ID 和相同 `cwd` 调用 `session/load` 恢复；请先关闭旧客户端，避免多个进程同时写入同一 JSONL。
 
 图片输入支持 base64 及本地 `file:` 图片链接，实际推理需要支持视觉的模型。工具图片同时输出 ACP 图片块和文件链接；回退文件保存在 `~/workspace/storage/media/pi-acp-bridge/`，不会自动清理。命令补全来自当前 Pi 会话加载的扩展、提示模板和已启用的技能，不包含仅适用于终端 UI 的内置命令。
 
-推理使用 Pi 已配置的模型及凭据。工作区 `cwd` 隔离上下文与相对路径，但不限制工具访问工作区之外的文件，不构成安全沙箱。不支持 ACP 登录、客户端 MCP 配置和模型切换。
+推理使用 Pi 已配置的模型及凭据。工作区 `cwd` 隔离上下文与相对路径，但不限制工具访问工作区之外的文件，不构成安全沙箱。不支持 ACP 登录和客户端 MCP 配置。模型切换写入会话历史，不修改全局默认模型。
+
+JetBrains Air 注册步骤及真实界面验收清单见 [docs/air-integration.md](docs/air-integration.md)。
 
 协议范围、扩展格式及测试边界见 [docs/protocol.md](docs/protocol.md)。

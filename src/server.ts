@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { decodePrompt, imageLink } from "./content.js";
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type { InitializeResponse, StopReason } from "@agentclientprotocol/sdk";
-import { discoverModels } from "./models.js";
+import { discoverModels, modelConfigOptions } from "./models.js";
 import { createToolUpdates } from "./tool-updates.js";
 import { availableCommands, createWorkspaceSession, type BridgeSession } from "./sessions.js";
 import packageInfo from "../package.json" with { type: "json" };
@@ -28,6 +28,7 @@ interface ManagedSession {
   session: BridgeSession;
   cwd: string;
   active?: ActivePrompt;
+  changingModel?: boolean;
 }
 
 export function startServer({ input, output, modelsPath, artifactDir = join(homedir(), "workspace/storage/media/pi-acp-bridge"), sessionIndexPath, createSession = createWorkspaceSession }: ServerOptions) {
@@ -81,7 +82,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         } });
         if (closed) throw new Error("Connection closed");
         sessions.set(sessionId, { session, cwd: params.cwd });
-        return { sessionId };
+        return { sessionId, configOptions: modelConfigOptions(session) };
       } catch {
         sessions.delete(sessionId);
         session.dispose();
@@ -112,17 +113,34 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         } });
         if (closed) throw new Error("Connection closed");
         sessions.set(sessionId, { session, cwd });
-        return {};
+        return { configOptions: modelConfigOptions(session) };
       } catch (error) {
         session?.dispose();
         if (error instanceof RequestError) throw error;
         throw new RequestError(-32603, "Unable to load Pi session; check session index and JSONL file");
       } finally { loading.delete(sessionId); }
     },
+    async setSessionConfigOption(params) {
+      const entry = getSession(params.sessionId);
+      if (entry.active || entry.changingModel) throw new RequestError(-32600, "Session is busy");
+      if (params.configId !== "model" || typeof params.value !== "string") {
+        throw RequestError.invalidParams("Unsupported session configuration option");
+      }
+      const session = entry.session;
+      const model = session.modelRuntime?.getModels().find((candidate) => `${candidate.provider}/${candidate.id}` === params.value);
+      if (!model || !session.setModel) throw RequestError.invalidParams("Unknown model");
+      entry.changingModel = true;
+      try {
+        await session.setModel(model);
+        return { configOptions: modelConfigOptions(session) };
+      } catch {
+        throw new RequestError(-32603, "Unable to switch Pi model; check credentials");
+      } finally { entry.changingModel = false; }
+    },
     async authenticate() { throw RequestError.methodNotFound("authenticate"); },
     async prompt(params) {
       const entry = getSession(params.sessionId);
-      if (entry.active) throw new RequestError(-32600, "Session already has an active prompt");
+      if (entry.active || entry.changingModel) throw new RequestError(-32600, "Session is busy");
       const { text, images } = decodePrompt(params.prompt);
       const active: ActivePrompt = { cancelled: false, unsubscribe: () => {} };
       entry.active = active;

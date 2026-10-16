@@ -21,6 +21,8 @@ test("routes concurrent workspace sessions, streams before completion, and relea
     });
     const pb = client.request("session/prompt", { sessionId: b, prompt: [{ type: "text", text: "B" }] });
     expect((await client.nextNotification()).params.sessionId).toBe(b);
+    expect(await client.request("session/set_config_option", { sessionId: a, configId: "model", value: "anthropic/other" }))
+      .toMatchObject({ error: { code: -32600 } });
     expect(await client.request("session/prompt", { sessionId: a, prompt: [{ type: "text", text: "overlap" }] }))
       .toMatchObject({ error: { code: -32600 } });
     sessions[0]!.finish();

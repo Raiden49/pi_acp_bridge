@@ -2,7 +2,7 @@
 
 ## 当前范围
 
-支持 ACP v1 初始化、模型发现、进程内多会话、图片输入输出、命令发现及持久化会话恢复。`authenticate` 仍返回 JSON-RPC `-32601`，模型切换与登录流程留待后续实现。取消通知不产生响应。没有启动 Pi 子进程。
+支持 ACP v1 初始化、模型发现、进程内多会话、图片输入输出、命令发现及持久化会话恢复。`authenticate` 仍返回 JSON-RPC `-32601`，登录流程留待后续实现。会话模型选择使用标准 `configOptions`。取消通知不产生响应。没有启动 Pi 子进程。
 
 `initialize` 返回：
 
@@ -28,11 +28,19 @@
 }
 ```
 
-模型 ID 为 `provider/id`，保留原始模型 ID 中的斜杠。只输出 ID 与显示名，不输出 endpoint、headers 或凭据。该扩展**不会自动填充 IDE 的标准模型下拉框**；原生模型选择需要后续会话配置接口接入。
+模型 ID 为 `provider/id`，保留原始模型 ID 中的斜杠。只输出 ID 与显示名，不输出 endpoint、headers 或凭据。该扩展本身**不会填充 IDE 的标准模型下拉框**；原生模型选择由下述会话配置接口提供。
 
 每次初始化调用 Pi 官方 `ModelRuntime`，读取 Pi agent 目录的 `models.json`（默认 `~/.pi/agent/models.json`，遵循 Pi 的 `PI_CODING_AGENT_DIR` 环境变量）。返回 Pi 内置聊天模型目录与配置覆盖/新增的聊天模型，不包含图片生成或分类模型。文件不存在时使用内置目录。目录不按凭据过滤，因此“已发现”不等于“可立即调用”。发现流程禁用创建时刷新，不执行远程目录请求、认证检查或密钥命令，不写入凭据或缓存。
 
 配置无效时返回 `-32603` / `Invalid Pi model configuration`。不转发 Pi 原始校验错误，以免泄漏配置内容；修正文件后可重试初始化。
+
+## 原生会话模型选择
+
+`session/new` 与 `session/load` 返回 `configOptions`：`id: "model"`、`name: "Model"`、`category: "model"`、`type: "select"`。`currentValue` 为当前模型的 `provider/id`，`options` 来自该 Pi 会话自己的 `modelRuntime`，每项使用 `{ value: "provider/id", name: "模型名 (provider)" }`。不按凭据过滤，不输出任何凭据；会话无当前模型或未提供模型接口时返回空列表。
+
+客户端发送 `session/set_config_option`，参数为 `{ sessionId, configId: "model", value: "provider/id" }`。桥接器调用 Pi `session.setModel()`，成功返回更新后的完整 `configOptions`。切换只影响指定会话，保留对话历史，由 Pi 记录模型变更供恢复，不修改全局默认模型。不支持旧的非标准 `session/set_model`。
+
+未知模型、未知配置项、非字符串值或未知会话返回 `-32602`；提示进行中或正在切换模型时返回 `-32600`，不隐式取消或排队。切换过程也拒绝新提示。凭据等 Pi 切换错误统一返回不含原始错误细节的 `-32603`。模型目录可见不代表已配置可用凭据。
 
 ## 会话生命周期与文本流
 
@@ -76,6 +84,10 @@ Pi 在桥接器进程内自主执行已启用工具，不额外请求 ACP 权限
 ## 测试边界
 
 `test/protocol-harness.ts` 用 `duplexPair()` 创建双向内存流，连接与 CLI 相同的 `startServer()`；测试仅收发带换行的 JSON-RPC，不查看 handler 或 Pi 的私有状态，不调用模型网络服务。
+
+`test/bundle.test.ts` 构建压缩单文件产物，检查 shebang 与 10 MB 体积预算，并启动禁止加载外部模块的真实 Node 进程进行 stdio 握手；进程 stdin 关闭后必须在超时内退出。此测试不调用真实模型或 IDE。
+
+`test/models.test.ts` 使用真实 Pi 会话，仅替换模型网络流，经 ACP 验证原生下拉框、切换后提示实际使用所选模型、其他会话不受影响，以及未知模型/配置项拒绝；恢复时的配置广告由持久化测试覆盖。内存协议测试结束时显式关闭双向流的两个写端，兼容 Node 22 的 half-open 行为。
 
 `test/initialize.test.ts` 覆盖握手、版本协商、无文件回退、自定义模型、重新发现、配置错误、密钥不泄漏与未实现认证的明确拒绝。
 

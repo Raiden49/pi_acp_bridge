@@ -45,6 +45,7 @@ export function protocolHarness(modelsPath: string, options: Partial<ServerOptio
     },
     async close() {
       client.end();
+      server.end();
       await connection.closed;
       lines.close();
       client.destroy();

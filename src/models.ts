@@ -1,5 +1,17 @@
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { RequestError } from "@agentclientprotocol/sdk";
+import { RequestError, type SessionConfigOption } from "@agentclientprotocol/sdk";
+import type { BridgeSession } from "./sessions.js";
+
+export function modelConfigOptions(session: BridgeSession): SessionConfigOption[] {
+  if (!session.model || !session.modelRuntime || !session.setModel) return [];
+  const models = new Map(session.modelRuntime.getModels().map((model) => [`${model.provider}/${model.id}`, model]));
+  const currentValue = `${session.model.provider}/${session.model.id}`;
+  models.set(currentValue, session.model);
+  return [{
+    id: "model", name: "Model", category: "model", type: "select", currentValue,
+    options: [...models].map(([value, model]) => ({ value, name: `${model.name} (${model.provider})` })),
+  }];
+}
 
 export interface AdvertisedModel {
   modelId: string;
