@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type { InitializeResponse, StopReason } from "@agentclientprotocol/sdk";
 import { discoverModels } from "./models.js";
+import { createToolUpdates } from "./tool-updates.js";
 import { createWorkspaceSession, type BridgeSession } from "./sessions.js";
 import packageInfo from "../package.json" with { type: "json" };
 
@@ -19,6 +20,7 @@ interface ActivePrompt {
 }
 interface ManagedSession {
   session: BridgeSession;
+  cwd: string;
   active?: ActivePrompt;
 }
 
@@ -63,7 +65,7 @@ export function startServer({ input, output, modelsPath, createSession = createW
         throw new RequestError(-32603, "Connection closed");
       }
       const sessionId = randomUUID();
-      sessions.set(sessionId, { session });
+      sessions.set(sessionId, { session, cwd: params.cwd });
       return { sessionId };
     },
     async authenticate() { throw RequestError.methodNotFound("authenticate"); },
@@ -81,6 +83,7 @@ export function startServer({ input, output, modelsPath, createSession = createW
       let deliveryFailed = false;
       // Pi listeners are synchronous; serialize writes and drain before responding.
       let updates = Promise.resolve();
+      const toolUpdates = createToolUpdates(entry.cwd);
       try {
         active.unsubscribe = entry.session.subscribe((event) => {
           if (active.cancelled) return;
@@ -95,6 +98,11 @@ export function startServer({ input, output, modelsPath, createSession = createW
               await client.sessionUpdate({ sessionId: params.sessionId, update: {
                 sessionUpdate, content: { type: "text", text },
               } });
+            }).catch(() => { deliveryFailed = true; });
+          }
+          for (const update of toolUpdates(event)) {
+            updates = updates.then(async () => {
+              if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update });
             }).catch(() => { deliveryFailed = true; });
           }
           if (event.type === "message_end" && event.message.role === "assistant") {

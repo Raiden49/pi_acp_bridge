@@ -1,0 +1,80 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { SessionUpdate, ToolCallContent, ToolKind } from "@agentclientprotocol/sdk";
+
+const kinds: Record<string, ToolKind> = {
+  read: "read", edit: "edit", write: "edit", bash: "execute", grep: "search", find: "search", ls: "read",
+};
+
+function snapshot(path: string): string | null | undefined {
+  try { return readFileSync(path, "utf8"); }
+  catch (error) {
+    // Only a missing file means creation; unreadable files must not yield invented diffs.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
+  }
+}
+
+function resolveToolPath(path: string, cwd: string) {
+  // Match Pi's tool path normalization, including mention prefixes and file URIs.
+  path = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
+  return resolve(cwd, path.startsWith("file://") ? fileURLToPath(path) : path);
+}
+
+function location(path: string, line: number) {
+  return { path, line, _meta: { "pi-acp-bridge/uri": pathToFileURL(path).href } };
+}
+
+export function createToolUpdates(cwd: string) {
+  const files = new Map<string, { path: string; oldText: string | null | undefined }>();
+  return (event: AgentSessionEvent): SessionUpdate[] => {
+    if (event.type === "tool_execution_start") {
+      const args = event.args as Record<string, unknown>;
+      const rawPath = args.path;
+      const path = typeof rawPath === "string" ? resolveToolPath(rawPath, cwd) : undefined;
+      if (path && (event.toolName === "edit" || event.toolName === "write")) {
+        // Session listeners are synchronous: capture before Pi can execute the tool.
+        files.set(event.toolCallId, { path, oldText: snapshot(path) });
+      }
+      const line = typeof args.offset === "number" ? Math.max(1, Math.trunc(args.offset)) : 1;
+      const updates: SessionUpdate[] = [{ sessionUpdate: "tool_call", toolCallId: event.toolCallId, title: event.toolName,
+        kind: kinds[event.toolName] ?? "other", status: "in_progress", rawInput: event.args,
+        locations: path ? [location(path, line)] : [],
+      }];
+      if (event.toolName === "ask_user_question" && Array.isArray(args.questions)) {
+        const text = args.questions.map((question: {
+          question: string; multiSelect?: boolean; options: Array<{ label: string; description?: string }>;
+        }) => `### ${question.question}\n\n${question.multiSelect ? "可多选。\n\n" : ""}${question.options.map((option, index) =>
+          `${index + 1}. **${option.label}**${option.description ? ` — ${option.description}` : ""}`).join("\n")}\n\n`).join("");
+        updates.push({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+      }
+      return updates;
+    }
+    if (event.type === "tool_execution_end" || event.type === "tool_execution_update") {
+      const result = event.type === "tool_execution_end" ? event.result : event.partialResult;
+      const content: ToolCallContent[] = (result.content ?? []).flatMap((block: { type: string; text?: string }) =>
+        block.type === "text" ? [{ type: "content" as const, content: { type: "text" as const, text: block.text ?? "" } }] : []);
+      const file = files.get(event.toolCallId);
+      let locations;
+      if (event.type === "tool_execution_end" && file) {
+        files.delete(event.toolCallId);
+        const newText = snapshot(file.path);
+        if (file.oldText !== undefined && typeof newText === "string" && newText !== file.oldText) {
+          content.push({ type: "diff", path: file.path, oldText: file.oldText, newText });
+          const before = (file.oldText ?? "").split("\n");
+          const after = newText.split("\n");
+          let index = 0;
+          while (index < before.length && index < after.length && before[index] === after[index]) index++;
+          locations = [location(file.path, Math.min(index + 1, after.length))];
+        }
+      }
+      return [{ sessionUpdate: "tool_call_update", toolCallId: event.toolCallId, content, rawOutput: result, locations,
+        status: event.type === "tool_execution_end" ? event.isError ? "failed" : "completed" : "in_progress" }];
+    }
+    return [];
+  };
+}
