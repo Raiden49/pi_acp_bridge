@@ -67,6 +67,9 @@ test("real Pi sessions isolate context, history and relative read paths over ACP
   try {
     const ids = await Promise.all(workspaces.map(async (cwd) =>
       (await client.request("session/new", { cwd, mcpServers: [] })).result.sessionId as string));
+    for (let i = 0; i < ids.length; i++) {
+      expect((await client.nextNotification()).params.update.sessionUpdate).toBe("available_commands_update");
+    }
     const prompts = ids.map((sessionId, i) => client.request("session/prompt", {
       sessionId, prompt: [{ type: "text", text: `Private prompt: ${i === 0 ? "alpha" : "beta"}` }],
     }));

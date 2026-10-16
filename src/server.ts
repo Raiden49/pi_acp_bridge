@@ -1,17 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
+import { decodePrompt, imageLink } from "./content.js";
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type { InitializeResponse, StopReason } from "@agentclientprotocol/sdk";
 import { discoverModels } from "./models.js";
 import { createToolUpdates } from "./tool-updates.js";
-import { createWorkspaceSession, type BridgeSession } from "./sessions.js";
+import { availableCommands, createWorkspaceSession, type BridgeSession } from "./sessions.js";
 import packageInfo from "../package.json" with { type: "json" };
+import { SessionIndex } from "./session-index.js";
+import { replayHistory } from "./history.js";
 
 export interface ServerOptions {
   input: ReadableStream<Uint8Array>;
   output: WritableStream<Uint8Array>;
   modelsPath?: string;
-  createSession?: (cwd: string) => Promise<BridgeSession>;
+  artifactDir?: string;
+  sessionIndexPath?: string;
+  createSession?: (cwd: string, sessionFile?: string) => Promise<BridgeSession>;
 }
 
 interface ActivePrompt {
@@ -24,8 +30,10 @@ interface ManagedSession {
   active?: ActivePrompt;
 }
 
-export function startServer({ input, output, modelsPath, createSession = createWorkspaceSession }: ServerOptions) {
+export function startServer({ input, output, modelsPath, artifactDir = join(homedir(), "workspace/storage/media/pi-acp-bridge"), sessionIndexPath, createSession = createWorkspaceSession }: ServerOptions) {
   const sessions = new Map<string, ManagedSession>();
+  const loading = new Set<string>();
+  const index = new SessionIndex(sessionIndexPath);
   let closed = false;
   function getSession(id: string) {
     const entry = sessions.get(id);
@@ -44,7 +52,7 @@ export function startServer({ input, output, modelsPath, createSession = createW
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: "pi-acp-bridge", version: packageInfo.version },
-        agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } },
+        agentCapabilities: { loadSession: true, promptCapabilities: { image: true, embeddedContext: true }, sessionCapabilities: { close: {} } },
         authMethods: [],
         _meta: { "pi-acp-bridge/models": await discoverModels(modelsPath) },
       };
@@ -65,17 +73,57 @@ export function startServer({ input, output, modelsPath, createSession = createW
         throw new RequestError(-32603, "Connection closed");
       }
       const sessionId = randomUUID();
-      sessions.set(sessionId, { session, cwd: params.cwd });
-      return { sessionId };
+      try {
+        if (session.sessionFile) await index.set(sessionId, { cwd: params.cwd, sessionFile: session.sessionFile });
+        if (closed) throw new Error("Connection closed");
+        if (session.resourceLoader) await client.sessionUpdate({ sessionId, update: {
+          sessionUpdate: "available_commands_update", availableCommands: availableCommands(session),
+        } });
+        if (closed) throw new Error("Connection closed");
+        sessions.set(sessionId, { session, cwd: params.cwd });
+        return { sessionId };
+      } catch {
+        sessions.delete(sessionId);
+        session.dispose();
+        throw new RequestError(-32603, "Unable to persist or advertise Pi session");
+      }
+    },
+    async loadSession(params) {
+      const { sessionId, cwd } = params;
+      if (!isAbsolute(cwd) || params.mcpServers.length || params.additionalDirectories?.length) throw RequestError.invalidParams("Unsupported workspace configuration");
+      if (sessions.has(sessionId) || loading.has(sessionId)) throw new RequestError(-32600, "Session already loaded");
+      loading.add(sessionId);
+      let session: BridgeSession | undefined;
+      try {
+        const record = await index.get(sessionId);
+        if (!record || record.cwd !== cwd) throw RequestError.invalidParams("Unknown session or workspace mismatch");
+        session = await createSession(cwd, record.sessionFile);
+        if (closed) throw new Error("Connection closed");
+        for (const update of replayHistory(session)) {
+          await client.sessionUpdate({ sessionId, update });
+          if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "image") {
+            await client.sessionUpdate({ sessionId, update: {
+              sessionUpdate: "agent_message_chunk", content: await imageLink(update.content, artifactDir),
+            } });
+          }
+        }
+        if (session.resourceLoader) await client.sessionUpdate({ sessionId, update: {
+          sessionUpdate: "available_commands_update", availableCommands: availableCommands(session),
+        } });
+        if (closed) throw new Error("Connection closed");
+        sessions.set(sessionId, { session, cwd });
+        return {};
+      } catch (error) {
+        session?.dispose();
+        if (error instanceof RequestError) throw error;
+        throw new RequestError(-32603, "Unable to load Pi session; check session index and JSONL file");
+      } finally { loading.delete(sessionId); }
     },
     async authenticate() { throw RequestError.methodNotFound("authenticate"); },
     async prompt(params) {
       const entry = getSession(params.sessionId);
       if (entry.active) throw new RequestError(-32600, "Session already has an active prompt");
-      if (params.prompt.some((block) => block.type !== "text")) {
-        throw RequestError.invalidParams("Only text prompts are supported");
-      }
-      const text = params.prompt.map((block) => block.type === "text" ? block.text : "").join("\n");
+      const { text, images } = decodePrompt(params.prompt);
       const active: ActivePrompt = { cancelled: false, unsubscribe: () => {} };
       entry.active = active;
       let stopReason: StopReason = "end_turn";
@@ -105,13 +153,29 @@ export function startServer({ input, output, modelsPath, createSession = createW
               if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update });
             }).catch(() => { deliveryFailed = true; });
           }
+          if (event.type === "tool_execution_end") {
+            for (const block of event.result.content ?? []) {
+              if (block.type !== "image") continue;
+              updates = updates.then(async () => {
+                if (active.cancelled) return;
+                await client.sessionUpdate({ sessionId: params.sessionId, update: {
+                  sessionUpdate: "agent_message_chunk", content: block,
+                } });
+                const link = await imageLink(block, artifactDir);
+                if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update: {
+                  sessionUpdate: "agent_message_chunk", content: link,
+                } });
+              }).catch(() => { deliveryFailed = true; });
+            }
+          }
           if (event.type === "message_end" && event.message.role === "assistant") {
             failed = event.message.stopReason === "error";
             stopReason = event.message.stopReason === "aborted" ? "cancelled"
               : event.message.stopReason === "length" ? "max_tokens" : "end_turn";
           }
         });
-        await entry.session.prompt(text);
+        if (images.length) await entry.session.prompt(text, { images });
+        else await entry.session.prompt(text);
         await updates;
         if (active.cancelled) return { stopReason: "cancelled" as const };
         if (failed || deliveryFailed) throw new Error("Prompt failed");

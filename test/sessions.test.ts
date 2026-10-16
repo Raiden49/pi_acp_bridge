@@ -129,7 +129,7 @@ test("rejects unsupported inputs before invoking Pi", async () => {
       .toMatchObject({ error: { code: -32602 } });
     expect(createSession).not.toHaveBeenCalled();
     const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
-    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "image", mimeType: "image/png", data: "AA==" }] }))
+    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "image", mimeType: "image/png", data: "not base64!" }] }))
       .toMatchObject({ error: { code: -32602 } });
     expect(session.listeners.size).toBe(0);
   } finally { await client.close(); }

@@ -56,8 +56,10 @@ export function createToolUpdates(cwd: string) {
     }
     if (event.type === "tool_execution_end" || event.type === "tool_execution_update") {
       const result = event.type === "tool_execution_end" ? event.result : event.partialResult;
-      const content: ToolCallContent[] = (result.content ?? []).flatMap((block: { type: string; text?: string }) =>
-        block.type === "text" ? [{ type: "content" as const, content: { type: "text" as const, text: block.text ?? "" } }] : []);
+      const content: ToolCallContent[] = [];
+      for (const block of result.content ?? []) {
+        if (block.type === "text" || block.type === "image") content.push({ type: "content", content: block });
+      }
       const file = files.get(event.toolCallId);
       let locations;
       if (event.type === "tool_execution_end" && file) {

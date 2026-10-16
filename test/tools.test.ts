@@ -62,6 +62,7 @@ async function toolRun(calls: Array<Pick<Extract<Message["content"][number], { t
   });
   try {
     const { sessionId } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    expect((await client.nextNotification()).params.update.sessionUpdate).toBe("available_commands_update");
     expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "go" }] }))
       .toMatchObject({ result: { stopReason: "end_turn" } });
     const updates = [];
