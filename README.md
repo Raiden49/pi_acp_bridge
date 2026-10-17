@@ -4,21 +4,13 @@
 
 # Pi ACP Bridge
 
-Use Pi in ACP-compatible IDEs. Built on the official Pi TypeScript SDK, the bridge runs Pi in-process and communicates with the IDE over stdio—no separate Pi process or background service required.
+Use [Pi](https://github.com/badlogic/pi-mono) in ACP-compatible IDEs. Built on the Pi TypeScript SDK, with no separate Pi process or background service required.
 
-## Features
-
-- Streaming text and reasoning, model selection, and Thinking controls.
-- Persistent workspace sessions with resume support.
-- Tool execution, structured file diffs, image input, and tool image output.
-- Slash commands, skill completion, and native interaction forms.
-- Client-provided stdio and Streamable HTTP MCP servers.
-
-UI support varies by client. See the [integration guide](docs/air-integration.md) for compatibility and validation notes.
+Supports streaming responses and reasoning, model and Thinking selection, Pi history discovery and resume, tools and file diffs, slash commands, images, native forms, and client-provided MCP servers. UI support varies by client.
 
 ## Quick start
 
-Prepare **Node.js 22.19+** through mise and **pnpm 12.9.1**, then clone and build:
+Requires **Node.js 22.19+** and **pnpm 12.9.1**.
 
 ```sh
 git clone https://github.com/Raiden49/pi_acp_bridge.git
@@ -27,13 +19,45 @@ pnpm install --frozen-lockfile --ignore-scripts
 pnpm run build
 ```
 
-The output is a standalone bundle at `dist/index.js`. It requires Node, but no adjacent `node_modules`. User-configured extensions and their external resources must still be available.
+Configure models and credentials in Pi first. The bridge reads `~/.pi/agent/` by default; set `PI_CODING_AGENT_DIR` to use another profile. ACP login is not implemented.
 
-Configure your models and credentials in Pi before chatting. The bridge uses `~/.pi/agent/` by default; set `PI_CODING_AGENT_DIR` to use another profile. ACP login is not implemented.
+## Connect your IDE
 
-## IDE configuration
+### CLion / PyCharm — Air in IDEs
 
-For JetBrains Air in IDEs, add an entry to `~/.jetbrains/acp.json`, preserving any existing agents:
+On macOS, install through a local registry to include the agent icon. Requires the **Air in IDEs** plugin with support for `air.acp.registry.path`; verified with CLion 2026.2 / Air 262.8665.497.
+
+1. After building, generate the local package using the Node runtime you want the agent to use:
+
+   ```sh
+   node scripts/create-local-registry.mjs
+   ```
+
+2. **Quit the IDE and back up** its `options/ide.general.xml`. The default macOS path is:
+
+   ```text
+   ~/Library/Application Support/JetBrains/<product-and-version>/options/ide.general.xml
+   ```
+
+   Replace `<product-and-version>` with your actual directory, such as `CLion2026.2` or `PyCharm2026.2`.
+
+3. Add or update this entry inside `<component name="Registry">`, using the absolute `registry.json` path printed by the script:
+
+   ```xml
+   <entry key="air.acp.registry.path"
+          value="/absolute/path/to/pi_acp_bridge/.scratch/local-registry/registry.json"
+          source="USER" />
+   ```
+
+   If the component is absent, create it inside `<application>`. Preserve all other settings; the value is a file path, not a `file://` URL.
+
+4. Restart the IDE, install **Pi Bridge** from Air's agent catalog, and start a new chat. No entry in `~/.jetbrains/acp.json` is needed.
+
+The script fetches the public catalog and adds **Pi Bridge**, preserving other agents and their icons. It stops on download failure rather than generating a single-agent catalog. Keep the generated directory. **The IDE uses this merged snapshot instead of the live public source**; rerun the script to refresh it. See the [setup guide](docs/ide-setup.md) for offline snapshots, changing paths, and uninstalling.
+
+### Standalone Air Desktop — macOS
+
+In `~/Library/Application Support/JetBrains/Air/acp.json`, add **Pi Bridge** under `agent_servers`, preserving existing agents:
 
 ```json
 {
@@ -47,37 +71,29 @@ For JetBrains Air in IDEs, add an entry to `~/.jetbrains/acp.json`, preserving a
 }
 ```
 
-The repository icon is at `assets/icon.svg`. The inspected Air in IDEs custom-agent configuration does not support an `icon` field; registry icons use a separate mechanism.
+Replace both paths with absolute paths on your machine. Use `node -p 'process.execPath'` to locate Node. GUI clients may not inherit your shell's PATH or API-key environment variables.
 
-Use absolute paths: GUI applications may not inherit your shell's PATH or API-key environment variables. The IDE supplies the workspace directory through ACP; do not hardcode it in the launch command.
+Refresh the agent list or restart the client, then select **Pi Bridge** and start a new chat. Send `/session` to check the connection without calling a model.
 
-For Zed, add the same entry under `agent_servers` in its settings, with `"type": "custom"` inside the entry. Standalone JetBrains Air uses a different configuration location; see the [integration guide](docs/air-integration.md).
+Air Desktop does not use the IDE registry setup above. For Zed configuration, see the [setup guide](docs/ide-setup.md).
 
 ## Update
 
-Finish active agent tasks, then run:
+Finish active tasks and ensure the working tree is clean, then run:
 
 ```sh
 ./update.sh
-# Or explicitly select an installed mise runtime:
-mise exec node@22.22.0 -- ./update.sh
 ```
 
-The script checks runtime versions and repository state, pulls the current branch's upstream with `--ff-only`, installs locked local dependencies, type-checks, and builds. It requires a clean working tree and does not install global tools or modify IDE settings, credentials, or chat history. Failures stop the update without automatically rolling back source, dependencies, or build output.
+This pulls upstream changes, installs locked dependencies, and rebuilds. It does not modify IDE settings, credentials, or chat history.
 
-**Restart the IDE's agent process after updating.** `/reload` reloads Pi resources, not bridge code. IDE paths can stay unchanged while the repository and Node locations remain the same.
+**Restart the client's agent process afterward.** `/reload` reloads Pi resources, not bridge code.
 
-## Usage notes
+## Notes
 
-- Use trusted workspaces only. Tools execute through Pi; workspace isolation is **not a filesystem sandbox**, and a displayed diff is not an approval gate.
-- Close the previous client before resuming the same session elsewhere. Do not let multiple processes write to the same session history.
-- Native forms require client support for `elicitation.form`. Images require a vision-capable model; rendering depends on the IDE.
-- stdout is reserved for ACP messages. The bundle is not an interactive terminal chat application.
-
-## Documentation
-
-- [Build and distribution](docs/releasing.md)
-- [IDE integration and troubleshooting](docs/air-integration.md)
-- [Protocol scope and testing](docs/protocol.md)
+- Use trusted workspaces only: tools execute through Pi without a filesystem sandbox. A displayed diff is not an approval gate.
+- Do not let multiple clients write to the same session history simultaneously. Bridge processes sharing a lease directory reject a second writer; stock Pi CLI does not honor this lease. Stop the ACP agent before resuming in Pi, and exit Pi before loading the session back in ACP.
+- `session/delete` permanently removes the Pi history file and bridge index entry. Air in IDEs 262.8665.497 invokes it from **Done**; `session/close` only releases resources. Generated image assets are retained.
+- See [client compatibility](docs/air-integration.md) for UI limitations and [protocol scope](docs/protocol.md) for supported ACP features.
 
 This is an independent integration, not an official JetBrains product.

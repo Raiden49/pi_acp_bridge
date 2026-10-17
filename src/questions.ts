@@ -26,7 +26,7 @@ export class Questions {
     const property: ElicitationPropertySchema = question.kind === "confirm"
       ? { type: "boolean", title: "确认", default: false }
       : { type: "string", title: "回答",
-        ...(question.kind === "select" ? { enum: question.choices } : { default: question.kind === "text" ? question.prefill : undefined }) };
+        ...(question.kind === "select" ? { enum: question.choices } : { default: question.prefill }) };
     const send = this.native;
     return new Promise<Answer | undefined>((resolve, reject) => {
       const controller = new AbortController();

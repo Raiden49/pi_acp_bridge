@@ -7,7 +7,7 @@ let themeReady = false;
 
 // ACP forms are interactive; arbitrary terminal widgets still need Pi CLI.
 export async function bindExtensionUI(session: BridgeSession, notify: (text: string) => void, questions: Questions) {
-  if (!session.bindExtensions || !session.extensionRunner) return;
+  if (!session.extensionRunner) return;
   if (!themeReady) { initTheme(); themeReady = true; }
   const terminalDialogError = "This extension requires a terminal dialog; use Pi CLI for this command.";
   const textForm = async (question: FormQuestion, options?: Parameters<Questions["ask"]>[1]) => {

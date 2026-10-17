@@ -20,8 +20,11 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
     await mkdir(resolve(agentDir, "extensions"), { recursive: true });
     await writeFile(resolve(agentDir, "models.json"), JSON.stringify({ providers: {
       baseline: { baseUrl: "https://example.invalid/v1", api: "openai-completions", apiKey: "test-only",
-        models: [{ id: "baseline-model" }] },
+        models: [{ id: "baseline-model" }, { id: "excluded-model" }] },
     } }));
+    await writeFile(resolve(agentDir, "settings.json"), JSON.stringify({
+      defaultProvider: "baseline", defaultModel: "baseline-model", enabledModels: ["bundle-provider/*"],
+    }));
     const oauthPath = resolve(root, "oauth.json");
     await writeFile(oauthPath, JSON.stringify({ openai: {
       type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 3_600_000,
@@ -34,7 +37,6 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
         const schema = Type.String();
         pi.registerCommand('bundle-extension', { description: schema.type, handler: async () => {} });
         pi.registerCommand('bundle-question', { handler: async (_args, ctx) => {
-          if (pi.getAllTools().some(tool => tool.name === 'bridge_ask_user')) throw new Error('Unexpected bridge question tool');
           pi.setSessionName('Bundle title');
           const answer = await ctx.ui.input('Bundle question');
           ctx.ui.notify('Bundle answer: ' + answer);
@@ -74,7 +76,7 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
       globalThis.fetch = async () => { throw new Error('Network forbidden in bundle regression'); };
       await import(entry);`;
     const child = exec(process.execPath, ["--input-type=module", "--eval", script], {
-      cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" }, timeout: 10_000,
+      cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_ACP_TRACE: "1" }, timeout: 10_000,
     });
     const lines = createInterface({ input: child.child.stdout! });
     const pending = new Map<number, (message: any) => void>();
@@ -112,6 +114,7 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
         { name: "ide", command: process.execPath, args: ["-e", mcpScript], env: [] },
       ] });
       expect(session.result?.configOptions[0]?.options).toContainEqual({ value: "bundle-provider/extension-model", name: "Extension model (bundle-provider)" });
+      expect(session.result.configOptions[0].options).not.toContainEqual(expect.objectContaining({ value: "baseline/excluded-model" }));
       const commands = messages.find((message) => message.params?.update?.sessionUpdate === "available_commands_update");
       expect(commands?.params.update.availableCommands).toContainEqual({ name: "bundle-extension", description: "string" });
       let pid = "";
@@ -123,11 +126,11 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
       expect(await request(3, "session/prompt", {
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-oauth" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });
-      expect(await readFile(resolve(root, "oauth-success"), "utf8").catch(() => "not-derived")).toBe("ok");
+      expect(await readFile(resolve(root, "oauth-success"), "utf8")).toBe("ok");
       expect(await request(4, "session/prompt", {
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-image" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });
-      expect(await readFile(resolve(root, "image-success"), "utf8").catch(() => "not-processed")).toBe("ok");
+      expect(await readFile(resolve(root, "image-success"), "utf8")).toBe("ok");
       expect(commands?.params.update.availableCommands.map((command: { name: string }) => command.name))
         .toEqual(expect.arrayContaining(["session", "reload", "compact"]));
       expect(await request(5, "session/prompt", {
@@ -150,6 +153,11 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
       expect(await request(8, "session/set_config_option", {
         sessionId: session.result.sessionId, configId: "thinking", value: "high",
       })).toMatchObject({ result: { configOptions: expect.arrayContaining([expect.objectContaining({ id: "thinking", currentValue: "high" })]) } });
+      expect(await request(10, "session/set_mode", {
+        sessionId: session.result.sessionId, modeId: "low",
+      })).toMatchObject({ result: {} });
+      expect(messages.some((message) => message.params?.update?.sessionUpdate === "current_mode_update"
+        && message.params.update.currentModeId === "low")).toBe(true);
       expect(await request(9, "session/prompt", {
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-question" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });
@@ -157,7 +165,13 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
       expect(messages.some((message) => message.method === "elicitation/create")).toBe(true);
       expect(messages.some((message) => message.params?.update?.content?.text?.includes("Bundle answer: confirmed"))).toBe(true);
       child.child.kill("SIGTERM");
-      await child;
+      const { stderr } = await child;
+      const trace = stderr.split("\n").filter((line) => line.startsWith("[pi-acp-bridge] "))
+        .map((line) => JSON.parse(line.slice("[pi-acp-bridge] ".length)));
+      expect(trace).toContainEqual(expect.objectContaining({ event: "prompt_received", sessionId: session.result.sessionId }));
+      expect(trace).toContainEqual(expect.objectContaining({ event: "prompt_settled" }));
+      const diagnostic = JSON.stringify(trace);
+      for (const secret of ["fixture-access", "fixture-refresh", "confirmed", "/bundle-question", root]) expect(diagnostic).not.toContain(secret);
       expect(() => process.kill(Number(pid), 0)).toThrow();
     } finally {
       child.child.stdin!.end();

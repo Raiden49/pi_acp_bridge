@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test } from "vitest";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { protocolHarness } from "./protocol-harness.js";
+import { createBareSession, createTestRuntime } from "./fixtures.js";
 import type { ServerOptions } from "../src/server.js";
 
 test("indexes Pi JSONL sessions and replays history to a second client after restart", async () => {
@@ -11,7 +12,12 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
   const agentDir = resolve(cwd, "agent");
   const sessionIndexPath = resolve(agentDir, "acp-sessions.json");
   await mkdir(agentDir);
-  const runtime = await ModelRuntime.create({ modelsPath: resolve(agentDir, "models.json"), refreshOnCreate: false, allowModelNetwork: false });
+  await writeFile(resolve(agentDir, "models.json"), JSON.stringify({ providers: {
+    "persistence-fixture": { baseUrl: "https://example.invalid/v1", api: "openai-completions", apiKey: "test-only",
+      models: [{ id: "reasoning", reasoning: true }, { id: "excluded", reasoning: false }] },
+  } }));
+  const runtime = await createTestRuntime(resolve(agentDir, "models.json"));
+  await runtime.setRuntimeApiKey("persistence-fixture", "test-only");
   let renameOutsidePrompt: (name: string) => void = () => {};
   const options: Partial<ServerOptions> = { sessionIndexPath, artifactDir: resolve(cwd, "artifacts"), async createSession(cwd, sessionFile) {
     const manager = sessionFile ? SessionManager.open(sessionFile) : SessionManager.create(cwd, resolve(agentDir, "sessions"));
@@ -26,28 +32,31 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       });
     }
-    const settingsManager = SettingsManager.inMemory();
-    const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
-      noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
-    });
-    await resourceLoader.reload();
-    const { session } = await createAgentSession({ cwd, agentDir, modelRuntime: runtime, settingsManager, resourceLoader,
-      sessionManager: manager, noTools: "all",
-    });
-    session.agent.streamFunction = () => { throw new Error("Model forbidden in persistence test"); };
+    const settingsManager = SettingsManager.inMemory({ enabledModels: ["persistence-fixture/reasoning"] });
+    const session = await createBareSession({ cwd, agentDir, modelRuntime: runtime, settingsManager,
+      sessionManager: manager, model: runtime.getModels("persistence-fixture")[0], noTools: "all" });
     renameOutsidePrompt = (name) => session.setSessionName(name);
     return session;
   } };
   let client = protocolHarness(resolve(agentDir, "models.json"), options);
   try {
-    const { sessionId, configOptions } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    const expectUsage = async () => expect((await client.nextNotification()).params.update.sessionUpdate).toBe("usage_update");
+    const { sessionId, modes } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    await expectUsage();
     await client.nextNotification();
+    expect(await client.request("session/set_mode", { sessionId, modeId: "high" })).toMatchObject({ result: {} });
+    expect((await client.nextNotification()).params.update).toMatchObject({ currentModeId: "high" });
+    const { configOptions } = (await client.nextNotification()).params.update;
+    expect(configOptions[0].options).toEqual([{ value: "persistence-fixture/reasoning", name: "reasoning (persistence-fixture)" }]);
+    await expectUsage();
     expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/name 发布测试" }] }))
       .toMatchObject({ result: { stopReason: "end_turn" } });
     expect((await client.nextNotification()).params.update).toMatchObject({ sessionUpdate: "session_info_update", title: "发布测试" });
     await client.nextNotification();
+    await expectUsage();
     await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/name" }] });
     expect((await client.nextNotification()).params.update.content.text).toContain("发布测试");
+    await expectUsage();
     renameOutsidePrompt("后台新标题");
     expect((await client.nextNotification()).params.update).toMatchObject({ sessionUpdate: "session_info_update", title: "后台新标题" });
     const index = JSON.parse(await readFile(sessionIndexPath, "utf8"));
@@ -58,7 +67,7 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
     expect(await client.request("session/load", { sessionId, cwd: resolve(cwd, "other"), mcpServers: [] }))
       .toMatchObject({ error: { code: -32602 } });
     expect(await client.request("session/load", { sessionId, cwd, mcpServers: [] }))
-      .toMatchObject({ result: { configOptions } });
+      .toMatchObject({ result: { configOptions, modes: { ...modes, currentModeId: "high" } } });
     expect((await client.nextNotification()).params).toEqual({ sessionId, update: {
       sessionUpdate: "user_message_chunk", content: { type: "text", text: "Remember this" },
     } });
@@ -69,6 +78,7 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
       history.push(update);
     }
     expect(history).toContainEqual(expect.objectContaining({ sessionUpdate: "session_info_update", title: "后台新标题" }));
+    expect(history).toContainEqual(expect.objectContaining({ sessionUpdate: "usage_update" }));
     expect(history.filter((update) => update.sessionUpdate === "agent_message_chunk")
       .every((update) => update.content.type === "text")).toBe(true);
     expect(history).toEqual(expect.arrayContaining([

@@ -1,14 +1,22 @@
 import { duplexPair, Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
 import { startServer, type ServerOptions } from "../src/server.js";
+import { completeSession, type TestSession } from "./fixtures.js";
 
 type Message = { id?: number; method?: string; params?: any; result?: any; error?: any };
 
-export function protocolHarness(modelsPath: string, options: Partial<ServerOptions> = {}) {
+type HarnessOptions = Partial<Omit<ServerOptions, "createSession">> & {
+  createSession?: (...args: Parameters<NonNullable<ServerOptions["createSession"]>>) => Promise<TestSession>;
+};
+
+export function protocolHarness(modelsPath: string, options: HarnessOptions = {}) {
   const [client, server] = duplexPair();
   const lines = createInterface({ input: client });
   const connection = startServer({
+    // Never discover personal history in protocol tests.
+    sessionDir: ".scratch/absent-session-history",
     ...options,
+    createSession: options.createSession && (async (...args) => completeSession(await options.createSession!(...args))),
     input: Readable.toWeb(server),
     output: Writable.toWeb(server),
     modelsPath,

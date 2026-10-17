@@ -1,19 +1,16 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test } from "vitest";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { protocolHarness } from "./protocol-harness.js";
+import { createTestRuntime, assistantStream } from "./fixtures.js";
 
-type Stream = Awaited<ReturnType<AgentSession["agent"]["streamFunction"]>>;
 
 test.each(["select", "input", "empty", "editor", "confirm", "decline", "cancel", "close", "stop", "unsupported"])("native question form handles %s without extra chat commands", async (mode) => {
   await mkdir(".scratch", { recursive: true });
   const cwd = await mkdtemp(resolve(".scratch/questions-"));
-  const runtime = await ModelRuntime.create({ modelsPath: resolve(cwd, "models.json"), refreshOnCreate: false, allowModelNetwork: false,
-    credentials: { async read() { return undefined; }, async list() { return []; },
-      async modify() { throw new Error("Read only"); }, async delete() { throw new Error("Read only"); } },
-  });
+  const runtime = await createTestRuntime(resolve(cwd, "models.json"));
   const model = runtime.getModels("anthropic")[0]!;
   await runtime.setRuntimeApiKey(model.provider, "test-only");
   let calls = 0;
@@ -43,18 +40,7 @@ test.each(["select", "input", "empty", "editor", "confirm", "decline", "cancel",
       calls++;
       const last = context.messages.at(-1)!;
       const text = last.role === "toolResult" ? JSON.stringify(last.content) : "";
-      const message: Awaited<ReturnType<Stream["result"]>> = {
-        role: "assistant", api: model.api, provider: model.provider, model: model.id,
-        content: text ? [{ type: "text", text }] : [{ type: "toolCall", id: "question", name: "fixture_question", arguments: {} }],
-        stopReason: text ? "stop" : "toolUse", timestamp: 1,
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      };
-      return { async *[Symbol.asyncIterator]() {
-        yield { type: "start", partial: message };
-        if (text) yield { type: "text_delta", contentIndex: 0, delta: text, partial: message };
-        yield { type: "done", reason: message.stopReason, message };
-      }, async result() { return message; } } as unknown as Stream;
+      return assistantStream(model, text ? [{ type: "text", text }] : [{ type: "toolCall", id: "question", name: "fixture_question", arguments: {} }]);
     };
     return session;
   } });

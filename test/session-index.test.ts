@@ -5,18 +5,6 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { SessionIndex } from "../src/session-index.js";
 
-test("an abandoned legacy directory lock does not block new writers", async () => {
-  await mkdir(".scratch", { recursive: true });
-  const cwd = await mkdtemp(resolve(".scratch/index-"));
-  const path = resolve(cwd, "acp-sessions.json");
-  const record = { cwd, sessionFile: resolve(cwd, "a.jsonl") };
-  try {
-    await mkdir(path + ".lock");
-    await new SessionIndex(path).set("a", record);
-    expect(await new SessionIndex(path).get("a")).toEqual(record);
-  } finally { await rm(cwd, { recursive: true, force: true }); }
-}, 10_000);
-
 test("never steals an active lock and recovers after its process is killed", async () => {
   await mkdir(".scratch", { recursive: true });
   const cwd = await mkdtemp(resolve(".scratch/index-"));
@@ -54,13 +42,14 @@ test("never steals an active lock and recovers after its process is killed", asy
   }
 });
 
-test("independent writers retain every session mapping and refuse to overwrite a damaged index", async () => {
+test("writers ignore legacy locks, retain concurrent mappings and preserve a damaged index", async () => {
   await mkdir(".scratch", { recursive: true });
   const cwd = await mkdtemp(resolve(".scratch/index-"));
   const path = resolve(cwd, "acp-sessions.json");
   const a = { cwd, sessionFile: resolve(cwd, "a.jsonl") };
   const b = { cwd, sessionFile: resolve(cwd, "b.jsonl") };
   try {
+    await mkdir(path + ".lock");
     await Promise.all([new SessionIndex(path).set("a", a), new SessionIndex(path).set("b", b)]);
     expect(await Promise.all(["a", "b"].map((id) => new SessionIndex(path).get(id)))).toEqual([a, b]);
     await writeFile(path, "damaged");

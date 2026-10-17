@@ -1,11 +1,11 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test } from "vitest";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { SessionManager, SettingsManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { protocolHarness } from "./protocol-harness.js";
+import { createBareSession, createTestRuntime, assistantStream } from "./fixtures.js";
 
-type Stream = Awaited<ReturnType<AgentSession["agent"]["streamFunction"]>>;
-type Message = Awaited<ReturnType<Stream["result"]>>;
+type Message = import("@earendil-works/pi-ai").AssistantMessage;
 
 async function toolRun(calls: Array<Pick<Extract<Message["content"][number], { type: "toolCall" }>, "name" | "arguments">>) {
   await mkdir(".scratch", { recursive: true });
@@ -13,55 +13,32 @@ async function toolRun(calls: Array<Pick<Extract<Message["content"][number], { t
   const agentDir = resolve(cwd, "agent");
   await mkdir(agentDir);
   await writeFile(resolve(cwd, "existing.txt"), "first\nold\n");
-  const runtime = await ModelRuntime.create({
-    modelsPath: resolve(agentDir, "models.json"), refreshOnCreate: false, allowModelNetwork: false,
-    credentials: {
-      async read() { return undefined; }, async list() { return []; },
-      async modify() { throw new Error("Read only"); }, async delete() { throw new Error("Read only"); },
-    },
-  });
+  const runtime = await createTestRuntime(resolve(agentDir, "models.json"));
   const model = runtime.getModels()[0]!;
   await runtime.setRuntimeApiKey(model.provider, "test-only-key");
   const client = protocolHarness(resolve(agentDir, "models.json"), {
     async createSession() {
       const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
-      const resourceLoader = new DefaultResourceLoader({
-        cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
-      });
-      await resourceLoader.reload();
-      const { session } = await createAgentSession({
-        cwd, agentDir, model, modelRuntime: runtime, settingsManager, resourceLoader,
+      const session = await createBareSession({
+        cwd, agentDir, model, modelRuntime: runtime, settingsManager,
         sessionManager: SessionManager.inMemory(cwd), tools: ["read", "edit", "write"],
         customTools: [{
-          name: "ask_user_question", label: "Question", description: "Ask a question",
+          name: "fixture_tool", label: "Fixture", description: "Return a fixture result",
           parameters: { type: "object", properties: {}, additionalProperties: true } as ToolDefinition["parameters"],
-          async execute() { return { content: [{ type: "text", text: "Question displayed" }], details: {} }; },
+          async execute() { return { content: [{ type: "text", text: "Fixture result" }], details: {} }; },
         }],
       });
       let turn = 0;
       session.agent.streamFunction = () => {
         const call = calls[turn++];
-        const message: Message = {
-          role: "assistant", api: model.api, provider: model.provider, model: model.id,
-          content: call ? [{ type: "toolCall", id: `call-${turn}`, ...call }] : [{ type: "text", text: "done" }],
-          stopReason: call ? "toolUse" : "stop", timestamp: Date.now(),
-          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-        };
-        return {
-          async *[Symbol.asyncIterator]() {
-            yield { type: "start", partial: message };
-            if (!call) yield { type: "text_delta", contentIndex: 0, delta: "done", partial: message };
-            yield { type: "done", reason: message.stopReason, message };
-          },
-          async result() { return message; },
-        } as unknown as Stream;
+        return assistantStream(model, call ? [{ type: "toolCall", id: `call-${turn}`, ...call }] : [{ type: "text", text: "done" }]);
       };
       return session;
     },
   });
   try {
     const { sessionId } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    expect((await client.nextNotification()).params.update.sessionUpdate).toBe("usage_update");
     expect((await client.nextNotification()).params.update.sessionUpdate).toBe("available_commands_update");
     expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "go" }] }))
       .toMatchObject({ result: { stopReason: "end_turn" } });
@@ -78,16 +55,10 @@ async function toolRun(calls: Array<Pick<Extract<Message["content"][number], { t
   }
 }
 
-test("question tools do not synthesize duplicate assistant questionnaires", async () => {
-  const { updates } = await toolRun([{ name: "ask_user_question", arguments: { questions: [{
-    question: "Which storage?", options: [
-      { label: "SQLite", description: "Local database" },
-      { label: "Postgres", description: "Shared database" },
-    ],
-  }] } }]);
+test("custom tools preserve input without synthesizing assistant messages", async () => {
+  const { updates } = await toolRun([{ name: "fixture_tool", arguments: { message: "Fixture input" } }]);
   expect(updates.some((update) => update.sessionUpdate === "agent_message_chunk")).toBe(false);
-  expect(updates[0]).toMatchObject({ sessionUpdate: "tool_call", title: "ask_user_question",
-    rawInput: { questions: [{ question: "Which storage?" }] } });
+  expect(updates[0]).toMatchObject({ sessionUpdate: "tool_call", title: "fixture_tool", rawInput: { message: "Fixture input" } });
 });
 
 test("edit and write diffs use actual before/after contents, including new files and failed edits", async () => {

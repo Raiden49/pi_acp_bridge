@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export interface SessionRecord { cwd: string; sessionFile: string }
+export interface SessionRecord { cwd: string; sessionFile: string; pending?: boolean }
 
 export class SessionIndex {
   constructor(private path = join(getAgentDir(), "acp-sessions.json")) {}
@@ -20,9 +20,12 @@ export class SessionIndex {
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== "object" || Array.isArray(value) || Object.values(value).some((entry) =>
       !entry || typeof entry.cwd !== "string" || !isAbsolute(entry.cwd) ||
-      typeof entry.sessionFile !== "string" || !isAbsolute(entry.sessionFile))) throw new Error("Invalid session index");
+      typeof entry.sessionFile !== "string" || !isAbsolute(entry.sessionFile) ||
+      (entry.pending !== undefined && typeof entry.pending !== "boolean"))) throw new Error("Invalid session index");
     return value as Record<string, SessionRecord>;
   }
+
+  async entries() { return this.read(); }
 
   async get(id: string) {
     const entries = await this.read();
@@ -30,6 +33,23 @@ export class SessionIndex {
   }
 
   async set(id: string, record: SessionRecord) {
+    await this.update((entries) => { entries[id] = record; });
+  }
+
+  async delete(id: string) {
+    return this.update(async (entries) => {
+      const record = Object.hasOwn(entries, id) ? entries[id] : undefined;
+      if (!record) return false;
+      // Keep the index on failure; a missing JSONL is already deleted.
+      await rm(record.sessionFile, { force: true });
+      for (const [alias, entry] of Object.entries(entries)) {
+        if (resolve(entry.sessionFile) === resolve(record.sessionFile)) delete entries[alias];
+      }
+      return true;
+    });
+  }
+
+  private async update<T>(change: (entries: Record<string, SessionRecord>) => T | Promise<T>): Promise<T> {
     await mkdir(dirname(this.path), { recursive: true });
     // SQLite owns the OS lock; crashes release it without guessing an owner's liveness.
     // Keep this coordination file: unlinking it could create two independent lock domains.
@@ -52,9 +72,10 @@ export class SessionIndex {
           await rm(join(dirname(this.path), name), { force: true });
         }
       }
-      entries[id] = record;
+      const result = await change(entries);
       await writeFile(temporary, JSON.stringify(entries, null, 2) + "\n", { mode: 0o600, flag: "wx" });
       await rename(temporary, this.path);
+      return result;
     } finally {
       try { await rm(temporary, { force: true }); }
       finally { mutex.close(); }

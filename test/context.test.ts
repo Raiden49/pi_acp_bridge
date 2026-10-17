@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test } from "vitest";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { protocolHarness } from "./protocol-harness.js";
+import { createBareSession, createTestRuntime } from "./fixtures.js";
 
 type Stream = Awaited<ReturnType<AgentSession["agent"]["streamFunction"]>>;
 type Message = Awaited<ReturnType<Stream["result"]>>;
@@ -10,10 +11,7 @@ type Message = Awaited<ReturnType<Stream["result"]>>;
 async function fixture(mode: "manual" | "cancel" | "overflow" | "empty") {
   await mkdir(".scratch", { recursive: true });
   const cwd = await mkdtemp(resolve(".scratch/context-"));
-  const runtime = await ModelRuntime.create({ modelsPath: resolve(cwd, "models.json"), refreshOnCreate: false, allowModelNetwork: false,
-    credentials: { async read() { return undefined; }, async list() { return []; },
-      async modify() { throw new Error("Read only"); }, async delete() { throw new Error("Read only"); } },
-  });
+  const runtime = await createTestRuntime(resolve(cwd, "models.json"));
   const model = { ...runtime.getModels("anthropic")[0]!, contextWindow: 4096, maxTokens: 512 };
   await runtime.setRuntimeApiKey(model.provider, "test-only");
   const requests: string[] = [];
@@ -30,10 +28,7 @@ async function fixture(mode: "manual" | "cancel" | "overflow" | "empty") {
     }
     const settingsManager = SettingsManager.inMemory({ retry: { enabled: false },
       compaction: { enabled: mode === "overflow", reserveTokens: 512, keepRecentTokens: 128 } });
-    const loader = new DefaultResourceLoader({ cwd, agentDir: cwd, settingsManager,
-      noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true });
-    await loader.reload();
-    const { session } = await createAgentSession({ cwd, agentDir: cwd, settingsManager, resourceLoader: loader,
+    const session = await createBareSession({ cwd, agentDir: cwd, settingsManager,
       sessionManager: manager, modelRuntime: runtime, model, noTools: "all" });
     session.agent.streamFunction = (_model, context, options) => {
       requests.push(JSON.stringify(context));
@@ -57,6 +52,7 @@ async function fixture(mode: "manual" | "cancel" | "overflow" | "empty") {
     return session;
   } });
   const { sessionId } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+  expect((await client.nextNotification()).params.update).toMatchObject({ sessionUpdate: "usage_update", size: 4096 });
   await client.nextNotification();
   return { client, cwd, sessionId, requests,
     prompt: (text: string) => client.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] }),
@@ -76,6 +72,7 @@ test("manual compaction reports progress, preserves requirements and restores fu
     expect(f.requests.at(-1)).toContain("Saved summary: preserve requirements.");
     expect(f.requests.at(-1)).not.toContain("Original turn 0");
     await f.client.nextNotification();
+    expect((await f.client.nextNotification()).params.update).toEqual({ sessionUpdate: "usage_update", used: 1010, size: 4096 });
     await f.client.request("session/close", { sessionId: f.sessionId });
     expect(await f.client.request("session/load", { sessionId: f.sessionId, cwd: f.cwd, mcpServers: [] })).toHaveProperty("result");
     const history = [];

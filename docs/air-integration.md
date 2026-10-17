@@ -50,45 +50,33 @@
 
 ## Air in IDEs：Thinking、表单和标题
 
-2026-10-17：用户当前使用 CLion / PyCharm 的 **Air in IDEs**，不是独立 Air 或旧 AI Assistant。该插件读取 `~/.jetbrains/acp.json`；本机已注册的 **Pi-Bridge** 直接运行本仓库 `dist/index.js`。注册表代理 **pi ACP** 是另一实现，不能用其旧聊天、菜单或元信息验证本桥接器。
+安装见 [README](../README.md#connect-your-ide)。Air Desktop、Air in IDEs 和 AI Assistant 是不同客户端；公共目录中的 `pi ACP` 也不是本桥接器。
 
-本轮不另造斜杠指令，补齐 Pi 原有 `/name` 的兼容支持；文件与命令执行仍交给 Pi。重新启动代理进程后验证：
+## 已知客户端差异
 
-1. reasoning 模型出现 Thinking 配置；切换非 reasoning 模型后隐藏，档位由当前模型决定。
-2. 使用已配置的扩展触发 Pi `select/input/confirm/editor`：应出现客户端原生表单，提交后继续原轮次，取消不能视作确认。桥接器不注册额外问答工具，也不针对插件猜测控件类型；Pi 传来 input 就呈现输入框，不自动转换成多选。程序仅在客户端声明 `elicitation.form` 时请求表单，不提供文字回答命令。
-3. Pi 已有标题及扩展产生的标题变更应通过 `session_info_update` 同步；重新加载仍保留。可用 Pi 原有 `/name <标题>` 改名、`/name` 查询；未实现 IDE 原生改名动作反向写回 Pi。
+| 客户端 / 版本 | 已观察到的行为 |
+| --- | --- |
+| Air Desktop 262.1037.6 | 原生助手图片显示为 JSON/Base64；工具图片可打开文件，但没有聊天内预览。旧聊天可能缓存模型列表。 |
+| CLion 2026.2.3.1 / AI Assistant 262.10968.223 | 原生助手图片不显示；工具图片可在编辑器打开，本地 Markdown 图片不预览。 |
+| CLion / Air in IDEs 262.8665.497 | 用户已确认原生行内/并排 Diff；不能据此推断表单、图片或所有配置控件均已验收。 |
 
-这些功能已通过本地协议及独立 bundle 验证，但 **Air in IDEs 的具体控件外观和展示行为仍待人工验收**。不以旧 AI Assistant 的能力或协议成功代替本插件界面证据；第三方自定义 TUI 工具也不会自动变成表单。
+这些结论仅针对列出的版本，不代表整个产品或其他 IDE。Zed、PyCharm 的具体界面行为不作未经实测的承诺。
 
-## 暂不实现：手动交接历史
+## 常见问题
 
-用户于 2026-10-17 明确暂不做交接。保留既有 `/reload`，不添加交接指令、暂停/恢复状态或磁盘历史刷新。用户观察执行 reload 后能接续的现象留待验证，不将资源重载宣称为历史重开。不要同时在两端写入同一 JSONL。
+- **找不到代理或无法连接**：检查配置文件是否属于当前客户端、Node 与 bundle 的绝对路径是否有效。更新代码后重启代理进程；`/reload` 不加载新代码。
+- **选择器有 Pi 图标，普通历史行却显示聊天图标**：2026-10-17 本机 CLion（build 262.10968.176）的只读运行时对照确认，Pi Bridge 与公共 `pi ACP` 都有正确的启动目标映射和缓存图标，但代理描述符的 `launchContributions` 为空。历史行仅通过该字段推导目标，退回通用聊天图标；显式传入已有目标 ID 则返回正确 Registry 图标。这是当前客户端查找路径的问题，不是 Bridge 漏传 ACP 图标字段；不通过改代理 ID、清历史或修改 IDE 绕过。完成、未读等状态图标覆盖不属于此问题。
+- **模型列表太多或没有更新**：在 Pi 的 `/scoped-models` 中选择后按 **Ctrl+S** 保存，再执行桥接器 `/reload`。Air Desktop 上旧聊天下拉框仍可能缓存旧值，已验证的办法是新建 Pi Bridge 聊天并发送 `/session`。后端范围更新不等于界面刷新。
+- **模型栏一直显示灰色占位**：Air in IDEs 262.8665.497 会拒绝名称等于模型 ID 的整个配置快照。桥接器已将显示名改为 `model_name (provider)`；升级后重启代理并新建会话验证，不需要清除认证或历史。
+- **模型可见但调用失败**：可用列表反映认证配置，不保证远端凭据有效。先在 Pi 中检查认证和默认提供商；不要复制或迁移认证来猜测修复。
+- **Air Desktop 日志报 `Failed to set config option mode`**：262.1037.6 可能将旧式 Thinking 选择保存为 `configId: "mode"`；桥接器接受它作为 `thinking` 的兼容别名，仍按当前模型校验，不表示权限模式。
+- **Thinking 选项未更新**：桥接器同时提供现代配置与旧式 modes；旧式协议不能动态替换完整档位列表，重新加载会话可重新取得列表。服务器始终按当前模型校验档位。
+- **表单不出现**：客户端须声明 `elicitation.form`。只支持 Pi 的 select/input/editor/confirm；自定义 TUI 和文案中的“多选”不会自动变成复选框。
+- **图片不内嵌显示**：桥接器保留工具原生图片，同时附加文件链接与导航；不保证聊天内预览。图片资产不会自动删除，默认保存在 `~/workspace/storage/media/pi-acp-bridge/`。
+- **没有 Diff**：只捕获 `edit` / `write` 的真实文件变化，不追踪 bash 或脚本中的任意改动。
+- **“完成”后 Pi 历史消失**：Air in IDEs 262.8665.497 的完成/归档流程会尝试 `session/delete`。桥接器支持该接口后会永久删除对应 Pi JSONL，不只是隐藏 IDE 列表；仅关闭会话不会删除历史。
+- **没有收到回复**：先用 `/session` 区分连接问题与模型问题。客户端提交失败时，桥接器可能根本没收到 prompt；不要因此直接删除聊天或缓存。
 
-## Air 注入的 MCP
+诊断输出只能写 stderr，stdout 专用于 ACP。图片无响应时，可在代理启动环境临时设置 `PI_ACP_TRACE=1` 并重启代理：`prompt_received` → `prompt_decoded` → `prompt_dispatched` → `prompt_settled` 分别表示收到、解析、交给 Pi/命令处理、结束；解析拒绝会记录 `prompt_rejected`。日志只含时间、会话 ID、数量/长度、阶段与错误码，不含正文、图片内容、文件 URI 或认证。没有 `prompt_received` 只能说明未进入 Bridge 提示处理器，不能据此断定是客户端、传输还是协议校验的问题。排查后关闭该环境变量。
 
-Air 的实际聊天会向 `session/new` 注入 MCP 服务，即使它探测模型列表时传入的是空列表。桥接器现支持这些 stdio / Streamable HTTP 配置：由 Pi 官方 MCP 扩展发现并执行工具，直接提供给模型；配置不写回全局文件。恢复会话采用新客户端的 MCP 参数，关闭/断线释放连接，SIGTERM/SIGINT 也先清理 MCP 子进程再退出。
-
-只有真实 MCP 工具调用成功才证明端到端连接正常；列表探测成功或会话创建成功本身不证明这一点。旧式 SSE、ACP 内嵌 MCP 和 MCP OAuth 界面不在当前支持范围。
-
-## 已定位的集成故障
-
-- 生成图片后聊天正文出现大段 Base64 / `resource_link` JSON：Air 将非文本助手块序列化展示，未渲染成附件。此前改为正文 Markdown“打开图片”绝对文件链接和可复制路径，用户已确认链接能打开文件。本轮按用户选择改为工具结果优先：保留原生工具图片，在同一结果附上文件链接、路径和 ACP 文件导航，不再额外插入同一图片的助手正文。恢复历史同样处理。新版工具导航仍待界面验收；此前诊断代理的工具文件打开不等于新版已验收。模型随后输出的 `![名称](/绝对路径)` 仍导致点击报错，现增加实时及历史文本转换：本地行内图片标记统一变为普通 `file:///` 链接，相对路径以会话 cwd 解析。模型链接转换的真实 Air 点击行为仍待验收，不宣称已支持正文内嵌预览。检查本机 Air 的 `fleet.plugins.ai.frontend.jar` 后确认：`AcpAgentFrontendKt.handleAgentMessageChunk` 仅对 `ContentBlock.Text` 提取正文，其他类型使用 `Json.encodeToString` 转成字符串；当前这条 ACP 助手消息路径没有原生图片渲染分支。
-
-- 图片提示返回“大小限制”，但原图仅约 912 KiB、1254×1254：Pi 在 Photon 加载失败时也返回 `[Image omitted: could not be resized below the inline image size limit.]`。生产构建现将 Photon WASM 压缩内嵌，避免依赖 bundle 外的文件；SDK 的 resize worker 不存在时使用官方进程内回退。独立 bundle 图片处理回归通过，并用该原图完成无模型请求验证。macOS 浮动截图拖入后、ACP 提示尚未到达的卡住问题尚未确认解决。
-
-- OpenAI OAuth 模型可展示、可选择，但提示返回统一错误：会话 JSONL 中实际为 `OAuth auth derivation failed ... Cannot find module .../dist/openai-chatgpt.js`。Pi 的 OAuth loader 使用变量动态导入，单文件构建无法自动收集模块；CLI 现注册 Pi 官方静态 OAuth loaders（导出名为 `registerBunOAuthFlows`，同样适用于 Node）。bundle 回归用临时假凭据实际执行 `ModelRuntime.getAuth('openai')`，禁止网络与外部模块加载，不接触用户认证。
-
-- 单文件构建必须定义 `PI_BUNDLED_NODE=true`。Pi SDK 据此使用内嵌虚拟模块和 `jiti/static` 加载扩展；否则初始化仍成功，但文件型扩展会因 `Cannot find module 'typebox'` 全部失效，扩展提供商（例如 `pi-antigravity`）也会从模型下拉框消失。不能仅用初始化握手证明生产 bundle 支持 Pi 配置。
-- Air 日志出现 `Cannot insert duplicate value AgentId(...)`，随后出现 `Failed to obtain agent frontend provider` 时，提交动作会在 IDE 前端失败，桥接器收不到 `session/prompt`。这不证明用户选错代理，也不证明模型服务未响应。可在用户授权后换一个临时代理名称验证是否能绕开该注册状态，不应擅自清空聊天或缓存。本次诊断暂用 `Pi-Bridge (Check)`，保留脱敏跟踪入口；后续用户已确认真实聊天恢复正常。
-- Air 可成功显示用户消息但随后立即报错：若跟踪显示 `session/new` 的 `mcpCount: 1`，旧版本会因拒绝客户端 MCP 返回 `-32602`，尚未调用模型。现通过真实接入修复，不静默丢弃 MCP 参数。
-- Pi 的默认提供商与认证提供商是不同配置。如果旧设置指定 `openai-codex/gpt-5.5`，但认证仅属于 `openai`，SDK 可能回退到 `openai/gpt-5.5`。桥接器不自动迁移、复制认证或改写用户默认设置。
-
-## 自动化证据
-
-- `pnpm run build`：生成压缩 bundle，保留可执行 shebang。
-- `pnpm exec vitest run test/bundle.test.ts`：真实子进程握手及创建会话，禁止外部模块加载；验证文件型 TypeScript 扩展可导入 TypeBox、注册命令与提供商，并出现在模型选择器中，无模型网络请求。
-- `pnpm exec vitest run test/models.test.ts`：真实 Pi 会话经 ACP 切换，确定性模型流证明下一次提示使用新模型，其他会话不变。
-- `test/mcp.test.ts`：本地 stdio / HTTP MCP 实际工具调用、字面凭据传递、恢复会话更新配置、关闭/断线清理。bundle 测试额外验证 SIGTERM 后 MCP 子进程退出。
-- `test/persistence.test.ts`：恢复会话继续提供模型配置；`test/sessions.test.ts`：活动提示期间拒绝切换。
-
-以上自动化证据不能替代界面验收。真实聊天与旧版图片文件链接已有用户反馈；原生 Diff、实际模型切换以及本轮新增交互仍待人工确认，不能据此宣称 #7 全部完成。
+协议测试通过不等于 IDE 界面已验收；真实模型请求可能产生费用。

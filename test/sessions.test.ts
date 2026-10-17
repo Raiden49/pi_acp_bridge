@@ -1,3 +1,5 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { expect, test, vi } from "vitest";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { protocolHarness } from "./protocol-harness.js";
@@ -23,11 +25,13 @@ test("routes concurrent workspace sessions, streams before completion, and relea
     expect((await client.nextNotification()).params.sessionId).toBe(b);
     expect(await client.request("session/set_config_option", { sessionId: a, configId: "model", value: "anthropic/other" }))
       .toMatchObject({ error: { code: -32600 } });
+    expect(await client.request("session/set_mode", { sessionId: a, modeId: "high" }))
+      .toMatchObject({ error: { code: -32600 } });
     expect(await client.request("session/prompt", { sessionId: a, prompt: [{ type: "text", text: "overlap" }] }))
       .toMatchObject({ error: { code: -32600 } });
     sessions[0]!.finish();
     expect(await pa).toMatchObject({ result: { stopReason: "end_turn" } });
-    expect(sessions[0]!.listeners.size).toBe(0);
+    expect(sessions[0]!.listeners.size).toBe(1); // The session title subscription remains until close.
     await client.request("session/close", { sessionId: b });
     expect(await pb).toMatchObject({ result: { stopReason: "cancelled" } });
     expect(sessions[1]!.dispose).toHaveBeenCalledOnce();
@@ -81,7 +85,7 @@ test.each([false, true])("cancel preserves chunks and allows retry when Pi rejec
     expect(await prompt).toMatchObject({ result: { stopReason: "cancelled" } });
     expect(session.abort).toHaveBeenCalledOnce();
     expect(session.dispose).not.toHaveBeenCalled();
-    expect(session.listeners.size).toBe(0);
+    expect(session.listeners.size).toBe(1);
     const retry = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "retry" }] });
     expect((await client.nextNotification()).params.update).toEqual({
       sessionUpdate: "agent_message_chunk", content: { type: "text", text: "/workspace/a:retry" },
@@ -103,7 +107,7 @@ test("prompt errors remove subscriptions, redact details, and allow retry", asyn
     expect(response).toMatchObject({ error: { code: -32603 } });
     expect(JSON.stringify(response)).not.toContain("secret-provider-detail");
     expect(prompt).toHaveBeenCalledWith("first\nsecond");
-    expect(session.listeners.size).toBe(0);
+    expect(session.listeners.size).toBe(1);
     const retry = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "retry" }] });
     await client.nextNotification();
     session.finish();
@@ -136,7 +140,7 @@ test("rejects unsupported inputs before invoking Pi", async () => {
     const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
     expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "image", mimeType: "image/png", data: "not base64!" }] }))
       .toMatchObject({ error: { code: -32602 } });
-    expect(session.listeners.size).toBe(0);
+    expect(session.listeners.size).toBe(1);
   } finally { await client.close(); }
 });
 
@@ -195,6 +199,44 @@ test.each(["close", "disconnect", "shutdown", "close-shutdown", "failure", "retr
     await closing;
     await stopping;
     await client.close();
+  }
+});
+
+test.each(["new", "load"])("shutdown waits for an opening session and its cleanup: %s", async (method) => {
+  await mkdir(".scratch", { recursive: true });
+  const cwd = await mkdtemp(resolve(".scratch/opening-"));
+  const sessionIndexPath = resolve(cwd, "index.json");
+  await writeFile(sessionIndexPath, JSON.stringify({ restored: { cwd, sessionFile: resolve(cwd, "history.jsonl") } }));
+  const session = fakeSession(cwd);
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const client = protocolHarness(resolve(cwd, "models.json"), { sessionIndexPath, async createSession() {
+    entered();
+    await gate;
+    return session;
+  } });
+  const creating = client.request(`session/${method}`, { cwd, mcpServers: [], sessionId: "restored" });
+  await started;
+  if (method === "load") expect(await client.request("session/delete", { sessionId: "restored" }))
+    .toMatchObject({ error: { code: -32600 } });
+  let stopped = false;
+  const shutdown = client.shutdown().then(() => { stopped = true; });
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    release();
+    expect(await creating).toMatchObject({ error: { code: -32603 } });
+    await shutdown;
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(await client.request("session/new", { cwd, mcpServers: [] })).toHaveProperty("error");
+  } finally {
+    release();
+    await creating;
+    await shutdown;
+    await client.close();
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 

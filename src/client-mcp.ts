@@ -1,5 +1,5 @@
 import { RequestError, type McpServer } from "@agentclientprotocol/sdk";
-import { createMcpExtension, type AgentSession, type ExtensionFactory, type McpServerEntry } from "@earendil-works/pi-coding-agent";
+import { createMcpExtension, type ExtensionFactory, type McpServerEntry } from "@earendil-works/pi-coding-agent";
 import { StdioTransport, StreamableHttpTransport } from "@earendil-works/pi-mcp";
 
 export function clientMcpEntries(servers: McpServer[]): McpServerEntry[] {
@@ -24,7 +24,7 @@ export function clientMcpEntries(servers: McpServer[]): McpServerEntry[] {
 
 export function clientMcpExtension(servers: McpServer[]): ExtensionFactory {
   const entries = clientMcpEntries(servers);
-  return createMcpExtension({
+  const extension = createMcpExtension({
     loadConfig: () => ({ servers: entries, errors: [], autoEnableCodemode: false }),
     // ACP env and header values are literal, not Pi config interpolation or shell commands.
     createTransport(entry, cwd) {
@@ -35,8 +35,13 @@ export function clientMcpExtension(servers: McpServer[]): ExtensionFactory {
     },
     updateConfig: () => { throw new Error("Client MCP configuration is managed by the IDE"); },
   });
-}
-
-export async function shutdownSession(session: Partial<Pick<AgentSession, "extensionRunner">>) {
-  await session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
+  const questionTools = new Set(entries.map((entry) => `mcp__${entry.name.replace(/-/g, "_")}__ask_user_question`));
+  return async (pi) => {
+    await extension(pi);
+    pi.on("before_agent_start", (event) => {
+      // Prefer only tools actually supplied by this client and active after discovery.
+      const tool = pi.getActiveTools().find((name) => questionTools.has(name));
+      if (tool) return { systemPrompt: `${event.systemPrompt}\nWhen asking the user a question, prefer the client's ${tool} tool over ask_user_question. Use other question tools only if the client tool is unavailable or fails.` };
+    });
+  };
 }

@@ -14,7 +14,6 @@ export function parseBridgeCommand(blocks: ContentBlock[]) {
 }
 
 export function sessionReport(session: BridgeSession, acpId: string, cwd: string): string {
-  if (!session.getSessionStats) throw RequestError.invalidParams("Session statistics unavailable");
   const stats = session.getSessionStats();
   return ["### Pi 会话", `标题：${session.sessionName ?? "未命名"}`, `Thinking：${session.thinkingLevel ?? "不可用"}`, `ACP ID：\`${acpId}\``, `Pi ID：\`${stats.sessionId}\``,
     `工作区：\`${cwd}\``, `历史文件：\`${stats.sessionFile ?? "内存会话"}\``,

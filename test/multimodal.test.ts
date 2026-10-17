@@ -13,7 +13,8 @@ test("passes inline and file-linked images to Pi and advertises vision support",
   const path = resolve(cwd, "pixel.png");
   await writeFile(path, Buffer.from(png, "base64"));
   const prompt = vi.fn(async () => {});
-  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => ({
+  const trace = vi.fn();
+  const client = protocolHarness(".scratch/absent-models.json", { trace, createSession: async () => ({
     prompt, subscribe: () => () => {}, abort: async () => {}, dispose() {},
   }) });
   try {
@@ -27,6 +28,17 @@ test("passes inline and file-linked images to Pi and advertises vision support",
     expect(prompt).toHaveBeenCalledWith("Compare", { images: [
       { type: "image", data: png, mimeType: "image/png" }, { type: "image", data: png, mimeType: "image/png" },
     ] });
+    expect(trace.mock.calls.map(([event]) => event.event)).toEqual([
+      "session_open", "session_ready", "prompt_received", "prompt_decoded", "prompt_dispatched", "prompt_settled",
+    ]);
+    expect(trace).toHaveBeenCalledWith(expect.objectContaining({ event: "prompt_decoded", images: 2, imageBase64Length: png.length * 2 }));
+    expect(await client.request("session/prompt", { sessionId, prompt: [
+      { type: "image", data: "not-base64", mimeType: "image/png" },
+    ] })).toMatchObject({ error: { code: -32602 } });
+    expect(trace).toHaveBeenLastCalledWith({ event: "prompt_rejected", sessionId, code: -32602 });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(trace.mock.calls);
+    for (const secret of ["Compare", png, path, "not-base64"]) expect(logged).not.toContain(secret);
   } finally { await client.close(); await rm(cwd, { recursive: true, force: true }); }
 });
 
