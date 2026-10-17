@@ -130,11 +130,12 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     void pending.then(remove, remove);
     return pending;
   }
-  function usageUpdate(session: BridgeSession): SessionUpdate | undefined {
+  function usageUpdate(session: BridgeSession, estimatedTokens?: number): SessionUpdate | undefined {
     const usage = session.getContextUsage();
-    // Pi may not have an estimate after compaction; never substitute cumulative tokens or zero.
-    if (usage?.tokens == null) return;
-    return { sessionUpdate: "usage_update", used: usage.tokens, size: usage.contextWindow };
+    // Compaction supplies a temporary estimate until post-compaction model usage is available.
+    const tokens = usage?.tokens ?? estimatedTokens;
+    if (!usage || tokens == null) return;
+    return { sessionUpdate: "usage_update", used: tokens, size: usage.contextWindow };
   }
   async function publishUsage(sessionId: string, session: BridgeSession) {
     const update = usageUpdate(session);
@@ -375,6 +376,15 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       function enqueueText(text: string, sessionUpdate: "agent_message_chunk" | "agent_thought_chunk" = "agent_message_chunk") {
         return text ? enqueueUpdate({ sessionUpdate, content: { type: "text", text } }) : updates;
       }
+      let lastUsage: { used: number; size: number } | undefined;
+      async function refreshUsage(estimatedTokens?: number) {
+        if (closed || sessions.get(params.sessionId) !== entry || deleting.has(params.sessionId)) return;
+        const update = usageUpdate(entry.session, estimatedTokens);
+        if (!update || update.sessionUpdate !== "usage_update") return;
+        if (lastUsage?.used === update.used && lastUsage.size === update.size) return;
+        await client.sessionUpdate({ sessionId: params.sessionId, update });
+        lastUsage = update;
+      }
       active.notify = enqueueText;
       active.update = enqueueUpdate;
       for (const notice of entry.notices?.splice(0) ?? []) enqueueText(notice);
@@ -387,6 +397,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
             enqueueText(event.result
               ? `压缩完成：${event.result.tokensBefore} → 约 ${event.result.estimatedTokensAfter ?? "未知"} token。${event.willRetry ? "继续处理当前请求。" : ""}\n`
               : event.aborted ? "上下文压缩已取消。\n" : "上下文压缩未完成。\n");
+            enqueue(() => refreshUsage(event.result?.estimatedTokensAfter));
           } else if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") {
             enqueueText(`请求暂时失败，准备重试（${event.attempt}/${event.maxAttempts}，约 ${Math.ceil(event.delayMs / 1000)} 秒后）。\n`);
           }
@@ -401,6 +412,10 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           for (const update of toolUpdates(event)) enqueueUpdate(update);
           if (event.type === "message_end" && event.message.role === "assistant") {
             enqueueText(imageLinks.finish());
+            // Pi persists message_end after notifying listeners; read usage from the queued task.
+            if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
+              enqueue(() => refreshUsage());
+            }
             failed = event.message.stopReason === "error";
             stopReason = event.message.stopReason === "aborted" ? "cancelled"
               : event.message.stopReason === "length" ? "max_tokens" : "end_turn";
@@ -449,7 +464,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         active.unsubscribe();
         // Also refresh after cancellation or a failed turn while the session remains open.
         if (!closed && sessions.get(params.sessionId) === entry && !deleting.has(params.sessionId)) {
-          updates = updates.then(() => publishUsage(params.sessionId, entry.session)).catch(() => {});
+          updates = updates.then(() => refreshUsage()).catch(() => {});
         }
         await updates;
         try {
