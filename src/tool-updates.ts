@@ -45,13 +45,6 @@ export function createToolUpdates(cwd: string) {
         kind: kinds[event.toolName] ?? "other", status: "in_progress", rawInput: event.args,
         locations: path ? [location(path, line)] : [],
       }];
-      if (event.toolName === "ask_user_question" && Array.isArray(args.questions)) {
-        const text = args.questions.map((question: {
-          question: string; multiSelect?: boolean; options: Array<{ label: string; description?: string }>;
-        }) => `### ${question.question}\n\n${question.multiSelect ? "可多选。\n\n" : ""}${question.options.map((option, index) =>
-          `${index + 1}. **${option.label}**${option.description ? ` — ${option.description}` : ""}`).join("\n")}\n\n`).join("");
-        updates.push({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
-      }
       return updates;
     }
     if (event.type === "tool_execution_end" || event.type === "tool_execution_update") {

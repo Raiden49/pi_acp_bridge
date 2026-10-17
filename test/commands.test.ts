@@ -66,7 +66,10 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
     const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
       noThemes: true, extensionFactories: [(pi) => {
         pi.registerCommand("hello", { description: "Say hello", handler: async (_args, ctx) => { ctx.ui.notify(ctx.ui.theme.fg("accent", "Hello from extension")); } });
-        pi.registerCommand("terminal", { handler: async (_args, ctx) => { await ctx.ui.confirm("Confirm", "Terminal dialog"); } });
+        pi.registerCommand("confirm", { handler: async (_args, ctx) => {
+          const answer = await ctx.ui.confirm("Confirm", "Proceed?");
+          ctx.ui.notify(`Confirmed: ${answer}`);
+        } });
       }],
     });
     await resourceLoader.reload();
@@ -75,6 +78,7 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
     })).session;
   } });
   try {
+    await client.request("initialize", { protocolVersion: 1, clientCapabilities: { elicitation: { form: {} } } });
     const { sessionId } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
     const notification = await client.nextNotification();
     expect(notification.params).toMatchObject({ sessionId, update: { sessionUpdate: "available_commands_update" } });
@@ -83,8 +87,8 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
       { name: "explain", description: "Explain code" }, { name: "hello", description: "Say hello" },
     ]));
     expect(commands.some((command: { name: string }) => command.name === "skill:review")).toBe(enableSkillCommands);
-    expect(commands.some((command: { name: string }) => command.name === "quit")).toBe(false);
-    expect(commands.map((command: { name: string }) => command.name)).toEqual(expect.arrayContaining(["session", "reload", "compact"]));
+    expect(commands.some((command: { name: string }) => ["quit", "answer", "handoff", "refresh-session"].includes(command.name))).toBe(false);
+    expect(commands.map((command: { name: string }) => command.name)).toEqual(expect.arrayContaining(["session", "reload", "compact", "name"]));
     if (enableSkillCommands) {
       await writeFile(resolve(agentDir, "prompts/new-template.md"), "---\ndescription: Newly loaded\n---\nNew template");
       expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/reload" }] }))
@@ -98,8 +102,15 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
       expect(refreshed).toContainEqual({ name: "new-template", description: "Newly loaded" });
       await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/hello" }] });
       expect((await client.nextNotification()).params.update.content.text).toBe("Hello from extension\n");
-      await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/terminal" }] });
-      expect((await client.nextNotification()).params.update.content.text).toContain("Pi CLI");
+      for (const accepted of [true, false]) {
+        const pending = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/confirm" }] });
+        const form = await client.nextNotification();
+        expect(form.method).toBe("elicitation/create");
+        expect(form.params.requestedSchema.properties.answer.type).toBe("boolean");
+        client.respond(form.id!, accepted ? { action: "accept", content: { answer: true } } : { action: "cancel" });
+        expect(await pending).toMatchObject({ result: { stopReason: "end_turn" } });
+        expect((await client.nextNotification()).params.update.content.text).toBe(`Confirmed: ${accepted}\n`);
+      }
     }
   } finally { await client.close(); await rm(cwd, { recursive: true, force: true }); }
 });

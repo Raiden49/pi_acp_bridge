@@ -78,16 +78,16 @@ async function toolRun(calls: Array<Pick<Extract<Message["content"][number], { t
   }
 }
 
-test("questionnaire choices render as numbered Markdown in the assistant stream", async () => {
+test("question tools do not synthesize duplicate assistant questionnaires", async () => {
   const { updates } = await toolRun([{ name: "ask_user_question", arguments: { questions: [{
     question: "Which storage?", options: [
       { label: "SQLite", description: "Local database" },
       { label: "Postgres", description: "Shared database" },
     ],
   }] } }]);
-  expect(updates.find((update) => update.sessionUpdate === "agent_message_chunk").content).toEqual({
-    type: "text", text: "### Which storage?\n\n1. **SQLite** — Local database\n2. **Postgres** — Shared database\n\n",
-  });
+  expect(updates.some((update) => update.sessionUpdate === "agent_message_chunk")).toBe(false);
+  expect(updates[0]).toMatchObject({ sessionUpdate: "tool_call", title: "ask_user_question",
+    rawInput: { questions: [{ question: "Which storage?" }] } });
 });
 
 test("edit and write diffs use actual before/after contents, including new files and failed edits", async () => {

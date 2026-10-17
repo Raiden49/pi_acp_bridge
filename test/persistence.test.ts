@@ -12,6 +12,7 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
   const sessionIndexPath = resolve(agentDir, "acp-sessions.json");
   await mkdir(agentDir);
   const runtime = await ModelRuntime.create({ modelsPath: resolve(agentDir, "models.json"), refreshOnCreate: false, allowModelNetwork: false });
+  let renameOutsidePrompt: (name: string) => void = () => {};
   const options: Partial<ServerOptions> = { sessionIndexPath, artifactDir: resolve(cwd, "artifacts"), async createSession(cwd, sessionFile) {
     const manager = sessionFile ? SessionManager.open(sessionFile) : SessionManager.create(cwd, resolve(agentDir, "sessions"));
     if (!sessionFile) {
@@ -30,13 +31,25 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
     });
     await resourceLoader.reload();
-    return (await createAgentSession({ cwd, agentDir, modelRuntime: runtime, settingsManager, resourceLoader,
+    const { session } = await createAgentSession({ cwd, agentDir, modelRuntime: runtime, settingsManager, resourceLoader,
       sessionManager: manager, noTools: "all",
-    })).session;
+    });
+    session.agent.streamFunction = () => { throw new Error("Model forbidden in persistence test"); };
+    renameOutsidePrompt = (name) => session.setSessionName(name);
+    return session;
   } };
   let client = protocolHarness(resolve(agentDir, "models.json"), options);
   try {
     const { sessionId, configOptions } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    await client.nextNotification();
+    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/name 发布测试" }] }))
+      .toMatchObject({ result: { stopReason: "end_turn" } });
+    expect((await client.nextNotification()).params.update).toMatchObject({ sessionUpdate: "session_info_update", title: "发布测试" });
+    await client.nextNotification();
+    await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/name" }] });
+    expect((await client.nextNotification()).params.update.content.text).toContain("发布测试");
+    renameOutsidePrompt("后台新标题");
+    expect((await client.nextNotification()).params.update).toMatchObject({ sessionUpdate: "session_info_update", title: "后台新标题" });
     const index = JSON.parse(await readFile(sessionIndexPath, "utf8"));
     expect(index[sessionId]).toMatchObject({ cwd });
     expect(await readFile(index[sessionId].sessionFile, "utf8")).toContain("Remember this");
@@ -55,6 +68,7 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
       if (update.sessionUpdate === "available_commands_update") break;
       history.push(update);
     }
+    expect(history).toContainEqual(expect.objectContaining({ sessionUpdate: "session_info_update", title: "后台新标题" }));
     expect(history.filter((update) => update.sessionUpdate === "agent_message_chunk")
       .every((update) => update.content.type === "text")).toBe(true);
     expect(history).toEqual(expect.arrayContaining([

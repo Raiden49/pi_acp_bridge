@@ -19,7 +19,7 @@ export function protocolHarness(modelsPath: string, options: Partial<ServerOptio
   const waiters: Array<(message: Message) => void> = [];
   lines.on("line", (line) => {
     const message = JSON.parse(line) as Message;
-    if (message.id !== undefined) {
+    if (message.id !== undefined && !message.method) {
       pending.get(message.id)?.(message);
       pending.delete(message.id);
     } else {
@@ -35,6 +35,9 @@ export function protocolHarness(modelsPath: string, options: Partial<ServerOptio
         pending.set(requestId, resolve);
         client.write(JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params }) + "\n");
       });
+    },
+    respond(requestId: number, result: unknown) {
+      client.write(JSON.stringify({ jsonrpc: "2.0", id: requestId, result }) + "\n");
     },
     notify(method: string, params: unknown) {
       client.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");

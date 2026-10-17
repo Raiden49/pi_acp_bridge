@@ -7,10 +7,17 @@ export function modelConfigOptions(session: BridgeSession): SessionConfigOption[
   const models = session.modelRuntime.getAvailableSnapshot();
   const currentValue = `${session.model.provider}/${session.model.id}`;
   if (!models.some((model) => `${model.provider}/${model.id}` === currentValue)) return [];
-  return [{
+  const options: SessionConfigOption[] = [{
     id: "model", name: "Model", category: "model", type: "select", currentValue,
     options: models.map((model) => ({ value: `${model.provider}/${model.id}`, name: `${model.name} (${model.provider})` })),
   }];
+  if (session.model.reasoning && session.setThinkingLevel && session.getAvailableThinkingLevels && session.thinkingLevel) {
+    options.push({ id: "thinking", name: "Thinking", category: "thought_level", type: "select",
+      currentValue: session.thinkingLevel,
+      options: session.getAvailableThinkingLevels().map((level) => ({ value: level, name: level })),
+    });
+  }
+  return options;
 }
 
 export interface AdvertisedModel {

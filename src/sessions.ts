@@ -5,7 +5,7 @@ import { RequestError, type McpServer } from "@agentclientprotocol/sdk";
 import { clientMcpExtension } from "./client-mcp.js";
 
 export type BridgeSession = Pick<AgentSession, "prompt" | "subscribe" | "abort" | "dispose"> &
-  Partial<Pick<AgentSession, "sessionFile" | "sessionManager" | "messages" | "resourceLoader" | "promptTemplates" | "settingsManager" | "extensionRunner" | "model" | "modelRuntime" | "setModel" | "getSessionStats" | "reload" | "compact" | "bindExtensions">>;
+  Partial<Pick<AgentSession, "sessionFile" | "sessionManager" | "messages" | "resourceLoader" | "promptTemplates" | "settingsManager" | "extensionRunner" | "model" | "modelRuntime" | "setModel" | "thinkingLevel" | "setThinkingLevel" | "getAvailableThinkingLevels" | "sessionName" | "setSessionName" | "getSessionStats" | "reload" | "compact" | "bindExtensions">>;
 
 export function availableCommands(session: BridgeSession) {
   const commands = new Map<string, { name: string; description: string }>();
@@ -14,6 +14,7 @@ export function availableCommands(session: BridgeSession) {
   };
   if (session.getSessionStats) add("session", "显示当前会话、历史路径与用量统计");
   if (session.reload) add("reload", "重新加载扩展、技能与模板（不刷新聊天历史）");
+  if (session.setSessionName) add("name", "查看或修改 Pi 会话标题");
   if (session.compact) add("compact", "压缩当前上下文；可附加摘要要求，会调用模型");
   for (const command of session.extensionRunner?.getRegisteredCommands() ?? []) add(command.invocationName, command.description);
   for (const template of session.promptTemplates ?? []) add(template.name, template.description);

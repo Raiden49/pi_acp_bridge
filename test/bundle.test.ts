@@ -33,6 +33,12 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
       export default function (pi) {
         const schema = Type.String();
         pi.registerCommand('bundle-extension', { description: schema.type, handler: async () => {} });
+        pi.registerCommand('bundle-question', { handler: async (_args, ctx) => {
+          if (pi.getAllTools().some(tool => tool.name === 'bridge_ask_user')) throw new Error('Unexpected bridge question tool');
+          pi.setSessionName('Bundle title');
+          const answer = await ctx.ui.input('Bundle question');
+          ctx.ui.notify('Bundle answer: ' + answer);
+        } });
         pi.registerCommand('bundle-image', { description: 'Verify bundled image processing', handler: async () => {
           const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
           const result = await resizeImage(bytes, 'image/png');
@@ -49,7 +55,7 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
         } });
         pi.registerProvider('bundle-provider', {
           baseUrl: 'https://example.invalid/v1', api: 'openai-completions', apiKey: 'test-only',
-          models: [{ id: 'extension-model', name: 'Extension model', reasoning: false,
+          models: [{ id: 'extension-model', name: 'Extension model', reasoning: true,
             input: ['text'], contextWindow: 4096, maxTokens: 512,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
         });
@@ -76,8 +82,13 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
     lines.on("line", (line) => {
       const message = JSON.parse(line);
       messages.push(message);
-      pending.get(message.id)?.(message);
-      pending.delete(message.id);
+      if (message.method === "elicitation/create") {
+        child.child.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+          result: { action: "accept", content: { answer: "confirmed" } } }) + "\n");
+      } else if (!message.method) {
+        pending.get(message.id)?.(message);
+        pending.delete(message.id);
+      }
     });
     async function request(id: number, method: string, params: unknown) {
       const response = new Promise<any>((resolve) => pending.set(id, resolve));
@@ -85,7 +96,7 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
       return Promise.race([response, child.then(() => { throw new Error("CLI exited before response"); })]);
     }
     try {
-      expect(await request(1, "initialize", { protocolVersion: 1, clientCapabilities: {} }))
+      expect(await request(1, "initialize", { protocolVersion: 1, clientCapabilities: { elicitation: { form: {} } } }))
         .toMatchObject({ result: { agentInfo: { name: "pi-acp-bridge", version: "0.1.0" } } });
       const pidFile = resolve(root, "mcp.pid");
       const mcpScript = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
@@ -133,6 +144,18 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
         if (pid === previousPid) await delay(10);
       }
       expect(pid).not.toBe(previousPid);
+      expect(await request(7, "session/set_config_option", {
+        sessionId: session.result.sessionId, configId: "model", value: "bundle-provider/extension-model",
+      })).toMatchObject({ result: { configOptions: expect.arrayContaining([expect.objectContaining({ id: "thinking" })]) } });
+      expect(await request(8, "session/set_config_option", {
+        sessionId: session.result.sessionId, configId: "thinking", value: "high",
+      })).toMatchObject({ result: { configOptions: expect.arrayContaining([expect.objectContaining({ id: "thinking", currentValue: "high" })]) } });
+      expect(await request(9, "session/prompt", {
+        sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-question" }],
+      })).toMatchObject({ result: { stopReason: "end_turn" } });
+      expect(messages.some((message) => message.params?.update?.title === "Bundle title")).toBe(true);
+      expect(messages.some((message) => message.method === "elicitation/create")).toBe(true);
+      expect(messages.some((message) => message.params?.update?.content?.text?.includes("Bundle answer: confirmed"))).toBe(true);
       child.child.kill("SIGTERM");
       await child;
       expect(() => process.kill(Number(pid), 0)).toThrow();

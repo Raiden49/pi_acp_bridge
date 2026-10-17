@@ -4,19 +4,19 @@ import type { BridgeSession } from "./sessions.js";
 export function parseBridgeCommand(blocks: ContentBlock[]) {
   // Embedded documents are context, not command invocations.
   const text = blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim();
-  const match = /^\/(session|reload|compact)(?:\s+([\s\S]*))?$/.exec(text);
+  const match = /^\/(session|reload|compact|name)(?:\s+([\s\S]*))?$/.exec(text);
   if (!match) return undefined;
   if (blocks.some((block) => block.type !== "text")) throw RequestError.invalidParams("Built-in commands accept text only; remove attachments");
   const name = match[1]!;
   const args = match[2]?.trim() || undefined;
-  if (name !== "compact" && args) throw RequestError.invalidParams(`Usage: /${name}`);
+  if (name !== "compact" && name !== "name" && args) throw RequestError.invalidParams(`Usage: /${name}`);
   return { name, args };
 }
 
 export function sessionReport(session: BridgeSession, acpId: string, cwd: string): string {
   if (!session.getSessionStats) throw RequestError.invalidParams("Session statistics unavailable");
   const stats = session.getSessionStats();
-  return ["### Pi 会话", `ACP ID：\`${acpId}\``, `Pi ID：\`${stats.sessionId}\``,
+  return ["### Pi 会话", `标题：${session.sessionName ?? "未命名"}`, `Thinking：${session.thinkingLevel ?? "不可用"}`, `ACP ID：\`${acpId}\``, `Pi ID：\`${stats.sessionId}\``,
     `工作区：\`${cwd}\``, `历史文件：\`${stats.sessionFile ?? "内存会话"}\``,
     `模型：${session.model ? `${session.model.provider}/${session.model.id}` : "未选择"}`,
     `消息：${stats.totalMessages}（用户 ${stats.userMessages}，助手 ${stats.assistantMessages}，工具结果 ${stats.toolResults}）`,

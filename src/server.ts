@@ -3,7 +3,7 @@ import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { decodePrompt, imageLink, toolImageLinks } from "./content.js";
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
-import type { InitializeResponse, StopReason, McpServer } from "@agentclientprotocol/sdk";
+import type { InitializeResponse, StopReason, McpServer, SessionUpdate } from "@agentclientprotocol/sdk";
 import { discoverModels, modelConfigOptions } from "./models.js";
 import { createToolUpdates } from "./tool-updates.js";
 import { availableCommands, createWorkspaceSession, type BridgeSession } from "./sessions.js";
@@ -14,6 +14,7 @@ import { clientMcpEntries, shutdownSession } from "./client-mcp.js";
 import { ImageLinkStream } from "./image-links.js";
 import { parseBridgeCommand, sessionReport } from "./commands.js";
 import { bindExtensionUI } from "./extension-ui.js";
+import { nativeQuestions, Questions, type NativeQuestion } from "./questions.js";
 
 export interface ServerOptions {
   input: ReadableStream<Uint8Array>;
@@ -28,6 +29,7 @@ interface ActivePrompt {
   cancelled: boolean;
   unsubscribe: () => void;
   notify?: (text: string) => void;
+  update?: (update: SessionUpdate) => Promise<void>;
   settled: Promise<void>;
 }
 interface ManagedSession {
@@ -36,6 +38,9 @@ interface ManagedSession {
   active?: ActivePrompt;
   changingModel?: boolean;
   notices?: string[];
+  questions?: Questions;
+  elicit?: NativeQuestion;
+  unsubscribeMetadata?: () => void;
 }
 
 export function startServer({ input, output, modelsPath, artifactDir = join(homedir(), "workspace/storage/media/pi-acp-bridge"), sessionIndexPath, createSession = createWorkspaceSession }: ServerOptions) {
@@ -43,32 +48,47 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
   const loading = new Set<string>();
   const index = new SessionIndex(sessionIndexPath);
   let closed = false;
+  let elicitationForm = false;
   function getSession(id: string) {
     const entry = sessions.get(id);
     if (!entry) throw RequestError.invalidParams("Unknown or closed session");
     return entry;
   }
-  async function bind(entry: ManagedSession) {
+  async function bind(entry: ManagedSession, publish: (update: SessionUpdate) => Promise<void>) {
     entry.notices = [];
+    const elicit = entry.elicit;
+    entry.questions = new Questions(elicit && (async (...args) => {
+      if (!entry.active || entry.active.cancelled) throw new Error("Forms require an active prompt");
+      return elicit(...args);
+    }));
     await bindExtensionUI(entry.session, (text) => {
       if (entry.active?.notify) entry.active.notify(text);
       else entry.notices!.push(text);
+    }, entry.questions);
+    if (entry.session.setSessionName) entry.unsubscribeMetadata = entry.session.subscribe((event) => {
+      if (event.type !== "session_info_changed" || entry.active?.cancelled) return;
+      const update: SessionUpdate = { sessionUpdate: "session_info_update", title: event.name ?? null };
+      if (entry.active?.update) void entry.active.update(update);
+      else void publish(update).catch(() => {});
     });
   }
   async function dispose(entry: ManagedSession) {
     if (entry.active) {
       entry.active.cancelled = true;
       entry.active.unsubscribe();
+      entry.questions?.cancel();
       const settled = entry.active.settled;
       await entry.session.abort().catch(() => {});
       // Reload cannot be interrupted; dispose its replacement runner, not the old one.
       await settled;
     }
+    entry.unsubscribeMetadata?.();
     try { await shutdownSession(entry.session); }
     finally { entry.session.dispose(); }
   }
   const connection = new AgentSideConnection((client) => ({
-    async initialize(): Promise<InitializeResponse> {
+    async initialize(params): Promise<InitializeResponse> {
+      elicitationForm = Boolean(params.clientCapabilities?.elicitation?.form);
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: "pi-acp-bridge", version: packageInfo.version },
@@ -94,9 +114,11 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         throw new RequestError(-32603, "Connection closed");
       }
       const sessionId = randomUUID();
-      const entry: ManagedSession = { session, cwd: params.cwd };
+      const entry: ManagedSession = { session, cwd: params.cwd,
+        elicit: elicitationForm ? nativeQuestions(client, sessionId) : undefined };
       try {
-        await bind(entry);
+        await bind(entry, (update) => client.sessionUpdate({ sessionId, update }));
+        if (session.sessionName) await client.sessionUpdate({ sessionId, update: { sessionUpdate: "session_info_update", title: session.sessionName } });
         if (session.sessionFile) await index.set(sessionId, { cwd: params.cwd, sessionFile: session.sessionFile });
         if (closed) throw new Error("Connection closed");
         if (session.resourceLoader) await client.sessionUpdate({ sessionId, update: {
@@ -107,7 +129,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         return { sessionId, configOptions: modelConfigOptions(session) };
       } catch {
         sessions.delete(sessionId);
-        await dispose({ session, cwd: params.cwd });
+        await dispose(entry);
         throw new RequestError(-32603, "Unable to persist or advertise Pi session");
       }
     },
@@ -118,13 +140,15 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       if (sessions.has(sessionId) || loading.has(sessionId)) throw new RequestError(-32600, "Session already loaded");
       loading.add(sessionId);
       let session: BridgeSession | undefined;
+      let entry: ManagedSession | undefined;
       try {
         const record = await index.get(sessionId);
         if (!record || record.cwd !== cwd) throw RequestError.invalidParams("Unknown session or workspace mismatch");
         session = await createSession(cwd, record.sessionFile, params.mcpServers);
         if (closed) throw new Error("Connection closed");
-        const entry: ManagedSession = { session, cwd };
-        await bind(entry);
+        entry = { session, cwd,
+          elicit: elicitationForm ? nativeQuestions(client, sessionId) : undefined };
+        await bind(entry, (update) => client.sessionUpdate({ sessionId, update }));
         for (const update of replayHistory(session)) {
           let presented = await toolImageLinks(update, artifactDir);
           if (update.sessionUpdate === "agent_message_chunk") {
@@ -136,6 +160,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           }
           await client.sessionUpdate({ sessionId, update: presented });
         }
+        if (session.sessionName) await client.sessionUpdate({ sessionId, update: { sessionUpdate: "session_info_update", title: session.sessionName } });
         if (session.resourceLoader) await client.sessionUpdate({ sessionId, update: {
           sessionUpdate: "available_commands_update", availableCommands: availableCommands(session),
         } });
@@ -143,7 +168,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         sessions.set(sessionId, entry);
         return { configOptions: modelConfigOptions(session) };
       } catch (error) {
-        if (session) await dispose({ session, cwd });
+        if (session) await dispose(entry ?? { session, cwd });
         if (error instanceof RequestError) throw error;
         throw new RequestError(-32603, "Unable to load Pi session; check session index and JSONL file");
       } finally { loading.delete(sessionId); }
@@ -151,6 +176,13 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     async setSessionConfigOption(params) {
       const entry = getSession(params.sessionId);
       if (entry.active || entry.changingModel) throw new RequestError(-32600, "Session is busy");
+      if (params.configId === "thinking") {
+        const session = entry.session;
+        const level = session.getAvailableThinkingLevels?.().find((level) => level === params.value);
+        if (!session.model?.reasoning || !session.setThinkingLevel || !level) throw RequestError.invalidParams("Unsupported thinking level for current model");
+        session.setThinkingLevel(level, { persist: false });
+        return { configOptions: modelConfigOptions(session) };
+      }
       if (params.configId !== "model" || typeof params.value !== "string") {
         throw RequestError.invalidParams("Unsupported session configuration option");
       }
@@ -182,15 +214,17 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       let updates = Promise.resolve();
       const toolUpdates = createToolUpdates(entry.cwd);
       const imageLinks = new ImageLinkStream(entry.cwd);
-      function enqueueText(text: string, sessionUpdate: "agent_message_chunk" | "agent_thought_chunk" = "agent_message_chunk") {
-        if (!text) return;
+      function enqueueUpdate(update: SessionUpdate) {
         updates = updates.then(async () => {
-          if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update: {
-            sessionUpdate, content: { type: "text", text },
-          } });
+          if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update });
         }).catch(() => { deliveryFailed = true; });
+        return updates;
+      }
+      function enqueueText(text: string, sessionUpdate: "agent_message_chunk" | "agent_thought_chunk" = "agent_message_chunk") {
+        return text ? enqueueUpdate({ sessionUpdate, content: { type: "text", text } }) : updates;
       }
       active.notify = enqueueText;
+      active.update = enqueueUpdate;
       for (const notice of entry.notices?.splice(0) ?? []) enqueueText(notice);
       try {
         active.unsubscribe = entry.session.subscribe((event) => {
@@ -228,6 +262,10 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         });
         if (command?.name === "session") {
           enqueueText(sessionReport(entry.session, params.sessionId, entry.cwd));
+        } else if (command?.name === "name") {
+          if (!entry.session.setSessionName) throw RequestError.invalidParams("Session naming unavailable");
+          if (command.args) entry.session.setSessionName(command.args);
+          enqueueText(entry.session.sessionName ? `会话标题：${entry.session.sessionName}\n` : "用法：/name <标题>\n");
         } else if (command?.name === "reload") {
           if (!entry.session.reload) throw RequestError.invalidParams("Reload unavailable");
           enqueueText("正在重新加载扩展、技能与模板……\n");
@@ -275,6 +313,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       const entry = getSession(sessionId);
       if (entry.active) {
         entry.active.cancelled = true;
+        entry.questions?.cancel();
         await entry.session.abort();
       }
     },

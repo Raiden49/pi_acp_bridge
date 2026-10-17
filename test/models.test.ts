@@ -8,6 +8,9 @@ test("native model selector switches the model used by the next prompt without c
   await mkdir(".scratch", { recursive: true });
   const cwd = await mkdtemp(resolve(".scratch/models-"));
   await writeFile(resolve(cwd, "models.json"), JSON.stringify({ providers: {
+    "bridge-test": { baseUrl: "https://example.invalid/v1", api: "openai-completions", models: [
+      { id: "reasoning", reasoning: true }, { id: "plain", reasoning: false },
+    ] },
     "unconfigured-bridge-test": { baseUrl: "https://example.invalid/v1", api: "openai-completions", models: [{ id: "hidden" }] },
   } }));
   const runtime = await ModelRuntime.create({
@@ -17,9 +20,11 @@ test("native model selector switches the model used by the next prompt without c
       async modify() { throw new Error("Read only"); }, async delete() { throw new Error("Read only"); },
     },
   });
-  const models = runtime.getModels("anthropic").slice(0, 2);
+  const candidates = runtime.getModels("bridge-test");
+  const models = [candidates.find((model) => model.reasoning)!, candidates.find((model) => !model.reasoning)!];
+  const efforts: unknown[] = [];
   const ids = models.map((model) => `${model.provider}/${model.id}`);
-  await runtime.setRuntimeApiKey("anthropic", "test-only-key");
+  await runtime.setRuntimeApiKey("bridge-test", "test-only-key");
   const client = protocolHarness(resolve(cwd, "models.json"), { async createSession() {
     const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
     const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: cwd, settingsManager,
@@ -30,7 +35,8 @@ test("native model selector switches the model used by the next prompt without c
       settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(cwd), noTools: "all",
     });
     type Stream = Awaited<ReturnType<AgentSession["agent"]["streamFunction"]>>;
-    session.agent.streamFunction = (model) => {
+    session.agent.streamFunction = (model, _context, options) => {
+      efforts.push(options?.reasoning);
       const text = `${model.provider}/${model.id}`;
       const message: Awaited<ReturnType<Stream["result"]>> = {
         role: "assistant", api: model.api, provider: model.provider, model: model.id,
@@ -53,6 +59,14 @@ test("native model selector switches the model used by the next prompt without c
       id: "model", category: "model", type: "select", currentValue: ids[0],
       options: expect.arrayContaining([expect.objectContaining({ value: ids[1] })]),
     }));
+    expect(a.configOptions).toContainEqual(expect.objectContaining({ id: "thinking", category: "thought_level" }));
+    expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "thinking", value: "high" }))
+      .toMatchObject({ result: { configOptions: expect.arrayContaining([expect.objectContaining({ id: "thinking", currentValue: "high" })]) } });
+    await client.request("session/prompt", { sessionId: a.sessionId, prompt: [{ type: "text", text: "Think" }] });
+    await client.nextNotification();
+    expect(efforts.at(-1)).toBe("high");
+    expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "thinking", value: "invalid" }))
+      .toMatchObject({ error: { code: -32602 } });
     expect(a.configOptions[0].options).not.toContainEqual(expect.objectContaining({ value: "unconfigured-bridge-test/hidden" }));
     const b = (await client.request("session/new", { cwd, mcpServers: [] })).result;
     await client.nextNotification();
