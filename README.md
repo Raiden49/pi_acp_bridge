@@ -1,37 +1,83 @@
-# pi_acp_bridge
+<p align="center">
+  <img src="assets/icon.svg" alt="Pi ACP Bridge icon" width="112" height="112">
+</p>
 
-基于 Pi 官方 TypeScript SDK 的进程内 ACP 桥接器，面向 IDE 集成。
+# Pi ACP Bridge
 
-当前支持 stdio JSON-RPC 初始化、动态模型目录发现、独立工作区持久化会话及跨客户端恢复、图片输入与工具图片输出、斜杠命令与技能自动补全、文本与思考分离的推理流、自主工具执行及结构化文件 Diff、通用原生交互表单、Thinking 配置、会话标题同步、取消及会话关闭。Pi 直接运行在桥接器进程内，不启动 Pi 子进程。
+Use Pi in ACP-compatible IDEs. Built on the official Pi TypeScript SDK, the bridge runs Pi in-process and communicates with the IDE over stdio—no separate Pi process or background service required.
 
-## 开发
+## Features
 
-需要通过 mise 管理的 Node.js **22.19+** 和 pnpm **12.9.1**。在已准备好的项目运行时下执行：
+- Streaming text and reasoning, model selection, and Thinking controls.
+- Persistent workspace sessions with resume support.
+- Tool execution, structured file diffs, image input, and tool image output.
+- Slash commands, skill completion, and native interaction forms.
+- Client-provided stdio and Streamable HTTP MCP servers.
+
+UI support varies by client. See the [integration guide](docs/air-integration.md) for compatibility and validation notes.
+
+## Quick start
+
+Prepare **Node.js 22.19+** through mise and **pnpm 12.9.1**, then clone and build:
 
 ```sh
-pnpm install --ignore-scripts
-pnpm run typecheck
-pnpm exec vitest run test/sessions.test.ts
+git clone https://github.com/Raiden49/pi_acp_bridge.git
+cd pi_acp_bridge
+pnpm install --frozen-lockfile --ignore-scripts
 pnpm run build
-node dist/index.js
 ```
 
-安装显式跳过依赖生命周期脚本；当前握手、测试和打包无需这些脚本。依赖只安装到项目本地，不使用全局安装。
+The output is a standalone bundle at `dist/index.js`. It requires Node, but no adjacent `node_modules`. User-configured extensions and their external resources must still be available.
 
-构建输出为压缩后的单文件 ESM bundle `dist/index.js`，带 CLI shebang，无需相邻 `node_modules` 即可启动，可通过 `node /absolute/path/to/dist/index.js` 启动。标准输出仅用于 ACP 消息，不用于日志。
+Configure your models and credentials in Pi before chatting. The bridge uses `~/.pi/agent/` by default; set `PI_CODING_AGENT_DIR` to use another profile. ACP login is not implemented.
 
-模型发现默认读取 `~/.pi/agent/models.json`，也支持 Pi 的 `PI_CODING_AGENT_DIR`。无需凭据或模型 API 请求即可完成初始化。初始化模型列表通过 `_meta["pi-acp-bridge/models"]` 扩展返回；创建及恢复会话通过标准 `configOptions` 提供 IDE 原生模型下拉框，使用 `session/set_config_option` 在空闲时切换当前会话模型。IDE 下拉框只展示 Pi 已配置认证的可用模型；初始化扩展仍是完整的已知模型目录，不用于填充下拉框。
+## IDE configuration
 
-会话使用 Pi 的独立 JSONL 历史，ACP ID 与文件路径保存在 `~/.pi/agent/acp-sessions.json`（遵循 `PI_CODING_AGENT_DIR`）。关闭或断开后，可以用原 ID 和相同 `cwd` 调用 `session/load` 恢复；请先关闭旧客户端，避免多个进程同时写入同一 JSONL。
+For JetBrains Air in IDEs, add an entry to `~/.jetbrains/acp.json`, preserving any existing agents:
 
-图片输入支持 base64 及本地 `file:` 图片链接，实际推理需要支持视觉的模型。工具结果保留原生图片，聊天正文使用 Markdown 绝对文件链接及可复制路径，避免客户端把图片块显示成 Base64 JSON；回退文件保存在 `~/workspace/storage/media/pi-acp-bridge/`，不会自动清理。命令补全包含 `/session`、`/reload`、`/compact` 和 Pi 原有 `/name` 的兼容适配，以及当前加载的扩展、提示模板和已启用的技能；不包含未适配的终端专用命令。
+```json
+{
+  "agent_servers": {
+    "Pi Bridge": {
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/pi_acp_bridge/dist/index.js"],
+      "env": {}
+    }
+  }
+}
+```
 
-推理使用 Pi 已配置的模型及凭据。工作区 `cwd` 隔离上下文与相对路径，但不限制工具访问工作区之外的文件，不构成安全沙箱。支持客户端按会话传入的 stdio / Streamable HTTP MCP 服务，通过 Pi 官方 MCP 扩展连接并提供工具；不支持旧式 SSE、ACP 内嵌 MCP 或 ACP 登录。模型切换写入会话历史，不修改全局默认模型。
+The repository icon is at `assets/icon.svg`. The inspected Air in IDEs custom-agent configuration does not support an `icon` field; registry icons use a separate mechanism.
 
-交互只转换 Pi 的 `select/confirm/input/editor` 为标准 ACP `elicitation/create` 表单，不新增问答工具或针对插件做特殊处理。IDE 必须声明表单能力；取消不会被当作批准。输入框保留输入语义，不从文案猜测多选。Thinking 使用原生配置项，标题通过 `session_info_update` 同步；均不依赖额外问答命令。
+Use absolute paths: GUI applications may not inherit your shell's PATH or API-key environment variables. The IDE supplies the workspace directory through ACP; do not hardcode it in the launch command.
 
-构建分发与验收边界见 [docs/releasing.md](docs/releasing.md)。
+For Zed, add the same entry under `agent_servers` in its settings, with `"type": "custom"` inside the entry. Standalone JetBrains Air uses a different configuration location; see the [integration guide](docs/air-integration.md).
 
-JetBrains Air 注册步骤及真实界面验收清单见 [docs/air-integration.md](docs/air-integration.md)。
+## Update
 
-协议范围、扩展格式及测试边界见 [docs/protocol.md](docs/protocol.md)。
+Finish active agent tasks, then run:
+
+```sh
+./update.sh
+# Or explicitly select an installed mise runtime:
+mise exec node@22.22.0 -- ./update.sh
+```
+
+The script checks runtime versions and repository state, pulls the current branch's upstream with `--ff-only`, installs locked local dependencies, type-checks, and builds. It requires a clean working tree and does not install global tools or modify IDE settings, credentials, or chat history. Failures stop the update without automatically rolling back source, dependencies, or build output.
+
+**Restart the IDE's agent process after updating.** `/reload` reloads Pi resources, not bridge code. IDE paths can stay unchanged while the repository and Node locations remain the same.
+
+## Usage notes
+
+- Use trusted workspaces only. Tools execute through Pi; workspace isolation is **not a filesystem sandbox**, and a displayed diff is not an approval gate.
+- Close the previous client before resuming the same session elsewhere. Do not let multiple processes write to the same session history.
+- Native forms require client support for `elicitation.form`. Images require a vision-capable model; rendering depends on the IDE.
+- stdout is reserved for ACP messages. The bundle is not an interactive terminal chat application.
+
+## Documentation
+
+- [Build and distribution](docs/releasing.md)
+- [IDE integration and troubleshooting](docs/air-integration.md)
+- [Protocol scope and testing](docs/protocol.md)
+
+This is an independent integration, not an official JetBrains product.

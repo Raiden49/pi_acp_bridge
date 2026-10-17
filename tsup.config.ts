@@ -7,6 +7,8 @@ export default defineConfig({
   entry: ["src/index.ts"],
   format: ["esm"],
   platform: "node",
+  // Prefix-only builtins such as node:sqlite must not become package imports.
+  removeNodeProtocol: false,
   target: "node22",
   clean: true,
   splitting: false,

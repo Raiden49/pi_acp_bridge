@@ -140,6 +140,64 @@ test("rejects unsupported inputs before invoking Pi", async () => {
   } finally { await client.close(); }
 });
 
+test.each(["close", "disconnect", "shutdown", "close-shutdown", "failure", "retry"] as const)("waits for a model switch before disposing: %s", async (mode) => {
+  const session = fakeSession("/workspace/a");
+  const model = { provider: "fixture", id: "model", name: "Fixture" } as NonNullable<AgentSession["model"]>;
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const order: string[] = [];
+  let failNext = mode === "failure" || mode === "retry";
+  session.dispose.mockImplementation(() => { order.push("dispose"); });
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => ({
+    ...session, model,
+    modelRuntime: { getAvailableSnapshot: () => [model] } as unknown as AgentSession["modelRuntime"],
+    async setModel() {
+      entered();
+      await gate;
+      order.push("switch");
+      if (failNext) { failNext = false; throw new Error("Auth failed"); }
+    },
+  }) });
+  let closing: Promise<unknown> | undefined;
+  let stopping: Promise<unknown> | undefined;
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
+    const switching = client.request("session/set_config_option", { sessionId, configId: "model", value: "fixture/model" });
+    await started;
+    if (mode === "retry") {
+      release();
+      expect(await switching).toHaveProperty("error");
+      expect(await client.request("session/set_config_option", { sessionId, configId: "model", value: "fixture/model" }))
+        .toHaveProperty("result");
+      return;
+    }
+    closing = mode === "disconnect" ? client.close() : mode === "shutdown" ? client.shutdown()
+      : client.request("session/close", { sessionId });
+    await new Promise((resolve) => setImmediate(resolve));
+    if (mode !== "disconnect") {
+      expect(await client.request("session/prompt", { sessionId, prompt: [] })).toMatchObject({ error: { code: -32602 } });
+    }
+    expect(order).toEqual([]);
+    if (mode === "close-shutdown") {
+      let shutdownFinished = false;
+      stopping = client.shutdown().then(() => { shutdownFinished = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(shutdownFinished).toBe(false);
+    }
+    release();
+    await closing;
+    if (mode !== "disconnect") expect(await switching).toHaveProperty(mode === "failure" ? "error" : "result");
+    expect(order).toEqual(["switch", "dispose"]);
+  } finally {
+    release();
+    await closing;
+    await stopping;
+    await client.close();
+  }
+});
+
 function fakeSession(cwd: string) {
   const listeners = new Set<Parameters<AgentSession["subscribe"]>[0]>();
   let finish = (_error?: Error) => {};

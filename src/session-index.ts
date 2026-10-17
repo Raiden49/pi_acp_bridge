@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
+import { DatabaseSync } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export interface SessionRecord { cwd: string; sessionFile: string }
@@ -30,25 +31,33 @@ export class SessionIndex {
 
   async set(id: string, record: SessionRecord) {
     await mkdir(dirname(this.path), { recursive: true });
-    // Serialize read-modify-write across bridge processes; rename keeps readers atomic.
-    const lock = `${this.path}.lock`;
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      try { await mkdir(lock); break; }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) throw error;
-        await setTimeout(20);
-      }
-    }
+    // SQLite owns the OS lock; crashes release it without guessing an owner's liveness.
+    // Keep this coordination file: unlinking it could create two independent lock domains.
+    const mutex = new DatabaseSync(`${this.path}.lock.sqlite`);
     const temporary = `${this.path}.${randomUUID()}.tmp`;
     try {
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        try { mutex.exec("BEGIN IMMEDIATE"); break; }
+        catch (error) {
+          if ((error as { errcode?: number }).errcode !== 5 || Date.now() >= deadline) throw error;
+          await setTimeout(20);
+        }
+      }
       const entries = await this.read();
+      // Only the lock owner can create index temporaries; leftovers belong to crashed writers.
+      const prefix = basename(this.path) + ".";
+      for (const name of await readdir(dirname(this.path))) {
+        if (name.startsWith(prefix) && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/.test(name.slice(prefix.length))) {
+          await rm(join(dirname(this.path), name), { force: true });
+        }
+      }
       entries[id] = record;
       await writeFile(temporary, JSON.stringify(entries, null, 2) + "\n", { mode: 0o600, flag: "wx" });
       await rename(temporary, this.path);
     } finally {
-      await rm(temporary, { force: true });
-      await rm(lock, { recursive: true, force: true });
+      try { await rm(temporary, { force: true }); }
+      finally { mutex.close(); }
     }
   }
 }

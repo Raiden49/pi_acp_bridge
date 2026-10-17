@@ -46,6 +46,7 @@ export function protocolHarness(modelsPath: string, options: Partial<ServerOptio
       const next = notifications.shift();
       return next ? Promise.resolve(next) : new Promise((resolve) => waiters.push(resolve));
     },
+    shutdown: () => connection.shutdown(),
     async close() {
       client.end();
       server.end();

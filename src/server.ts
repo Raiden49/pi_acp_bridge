@@ -36,7 +36,7 @@ interface ManagedSession {
   session: BridgeSession;
   cwd: string;
   active?: ActivePrompt;
-  changingModel?: boolean;
+  changingModel?: Promise<void>;
   notices?: string[];
   questions?: Questions;
   elicit?: NativeQuestion;
@@ -46,6 +46,7 @@ interface ManagedSession {
 export function startServer({ input, output, modelsPath, artifactDir = join(homedir(), "workspace/storage/media/pi-acp-bridge"), sessionIndexPath, createSession = createWorkspaceSession }: ServerOptions) {
   const sessions = new Map<string, ManagedSession>();
   const loading = new Set<string>();
+  const disposing = new Set<Promise<void>>();
   const index = new SessionIndex(sessionIndexPath);
   let closed = false;
   let elicitationForm = false;
@@ -72,7 +73,13 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       else void publish(update).catch(() => {});
     });
   }
-  async function dispose(entry: ManagedSession) {
+  function dispose(entry: ManagedSession) {
+    const pending = disposeSession(entry);
+    disposing.add(pending);
+    void pending.then(() => disposing.delete(pending), () => disposing.delete(pending));
+    return pending;
+  }
+  async function disposeSession(entry: ManagedSession) {
     if (entry.active) {
       entry.active.cancelled = true;
       entry.active.unsubscribe();
@@ -82,6 +89,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       // Reload cannot be interrupted; dispose its replacement runner, not the old one.
       await settled;
     }
+    await entry.changingModel;
     entry.unsubscribeMetadata?.();
     try { await shutdownSession(entry.session); }
     finally { entry.session.dispose(); }
@@ -189,13 +197,15 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       const session = entry.session;
       const model = session.modelRuntime?.getAvailableSnapshot().find((candidate) => `${candidate.provider}/${candidate.id}` === params.value);
       if (!model || !session.setModel) throw RequestError.invalidParams("Unknown or unavailable model");
-      entry.changingModel = true;
+      const switching = Promise.resolve().then(() => session.setModel!(model));
+      // Track settlement independently of success so shutdown also waits for failed switches.
+      entry.changingModel = switching.then(() => {}, () => {});
       try {
-        await session.setModel(model);
+        await switching;
         return { configOptions: modelConfigOptions(session) };
       } catch {
         throw new RequestError(-32603, "Unable to switch Pi model; check credentials");
-      } finally { entry.changingModel = false; }
+      } finally { entry.changingModel = undefined; }
     },
     async authenticate() { throw RequestError.methodNotFound("authenticate"); },
     async prompt(params) {
@@ -328,9 +338,10 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
   function shutdown() {
     if (shuttingDown) return shuttingDown;
     closed = true;
-    const closing = [...sessions.values()].map(dispose);
+    for (const entry of sessions.values()) void dispose(entry);
     sessions.clear();
-    shuttingDown = Promise.allSettled(closing).then(() => {});
+    // Include close requests that already removed their session from the live map.
+    shuttingDown = Promise.allSettled([...disposing]).then(() => {});
     return shuttingDown;
   }
   return { closed: connection.closed.then(shutdown), shutdown };

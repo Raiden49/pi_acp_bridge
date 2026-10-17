@@ -45,6 +45,7 @@ node /absolute/path/to/index.js
 - Air in IDEs 使用 `~/.jetbrains/acp.json`；独立 Air 使用它自己的配置文件。注册示例和客户端区别见 [air-integration.md](air-integration.md)。
 - 替换产物后必须重启代理进程；`/reload` 只重载 Pi 资源，不升级运行中的桥接代码。
 - 无需清空 IDE 聊天、删除 JSONL 或迁移认证。
+- 索引锁从目录锁升级为 Node 内置 SQLite 事务锁后，必须先停止所有旧版桥接进程，不能新旧版本混写同一索引。JSON 格式不变，不需迁移数据；旧 `.lock` 目录不再使用，新增的 `.lock.sqlite` 协调文件必须保留。部分 Node 22 版本会向 stderr 输出 SQLite 实验性 API 提示，不影响 stdout 的 ACP NDJSON。无需安装额外数据库或依赖。
 - 模型与 Thinking 使用标准配置项；Pi `select/input/editor/confirm` 使用标准 ACP 表单；`/name` 兼容 Pi 已有语法。不附带新的问答工具，不针对某个插件做特殊适配。
 - 客户端必须声明 `elicitation.form` 才能交互。SDK 输入原语没有结构化多选参数时，桥接器不会从文案推断复选框。
 - 用户标题、模型历史、工具执行及权限边界见 [protocol.md](protocol.md)。文件和命令继续由 Pi 执行，不构成文件系统沙箱。
