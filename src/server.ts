@@ -342,7 +342,8 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       if (entry.active || entry.changingConfiguration) throw new RequestError(-32600, "Session is busy");
       const command = parseBridgeCommand(params.prompt);
       let decoded: ReturnType<typeof decodePrompt>;
-      try { decoded = decodePrompt(params.prompt); }
+      // Local commands ignore attached context, including images that need not be read or decoded.
+      try { decoded = decodePrompt(command ? params.prompt.filter((block) => block.type === "text") : params.prompt); }
       catch (error) {
         trace({ event: "prompt_rejected", sessionId: params.sessionId, code: error instanceof RequestError ? error.code : -32603 });
         throw error;

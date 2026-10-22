@@ -2,11 +2,10 @@ import { RequestError, type ContentBlock } from "@agentclientprotocol/sdk";
 import type { BridgeSession } from "./sessions.js";
 
 export function parseBridgeCommand(blocks: ContentBlock[]) {
-  // Embedded documents are context, not command invocations.
+  // Only text blocks invoke commands; attached editor resources are context, not arguments.
   const text = blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim();
   const match = /^\/(session|reload|compact|name)(?:\s+([\s\S]*))?$/.exec(text);
   if (!match) return undefined;
-  if (blocks.some((block) => block.type !== "text")) throw RequestError.invalidParams("Built-in commands accept text only; remove attachments");
   const name = match[1]!;
   const args = match[2]?.trim() || undefined;
   if (name !== "compact" && name !== "name" && args) throw RequestError.invalidParams(`Usage: /${name}`);

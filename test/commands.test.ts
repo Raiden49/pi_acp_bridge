@@ -4,6 +4,7 @@ import { expect, test, vi } from "vitest";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { protocolHarness } from "./protocol-harness.js";
 import { createTestRuntime } from "./fixtures.js";
+import { parseBridgeCommand } from "../src/commands.js";
 
 test("/session reports session state without sending a model prompt", async () => {
   const prompt = vi.fn(async () => { throw new Error("Model must not be called"); });
@@ -20,10 +21,31 @@ test("/session reports session state without sending a model prompt", async () =
     const { update } = (await client.nextNotification()).params;
     expect(update.content.text).toContain("pi-session");
     expect(update.content.text).toContain("620");
-    for (const blocks of [
-      [{ type: "text", text: "/session unexpected" }],
-      [{ type: "text", text: "/reload" }, { type: "resource", resource: { uri: "file:///context.txt", text: "Context" } }],
-    ]) expect(await client.request("session/prompt", { sessionId, prompt: blocks })).toMatchObject({ error: { code: -32602 } });
+    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/session unexpected" }] }))
+      .toMatchObject({ error: { code: -32602 } });
+    expect(prompt).not.toHaveBeenCalled();
+  } finally { await client.close(); }
+});
+
+test("local commands ignore attached editor context without decoding it or calling the model", async () => {
+  const reload = vi.fn(async () => {});
+  const prompt = vi.fn(async () => { throw new Error("Model must not be called"); });
+  const context = [
+    { type: "resource" as const, resource: { uri: "file:///context.txt", text: "/name not-a-command" } },
+    { type: "resource_link" as const, uri: "file:///missing-context.png", name: "editor image", mimeType: "image/png" },
+    { type: "image" as const, mimeType: "image/png", data: "not-base64" },
+  ];
+  expect(parseBridgeCommand(context)).toBeUndefined();
+  expect(parseBridgeCommand([{ type: "text", text: "/name Actual title" }, ...context]))
+    .toEqual({ name: "name", args: "Actual title" });
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => ({
+    prompt, reload, subscribe: () => () => {}, abort: async () => {}, dispose() {},
+  }) });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace", mcpServers: [] })).result;
+    expect(await client.request("session/prompt", { sessionId, prompt: [context[0], { type: "text", text: "/reload" }, ...context.slice(1)] }))
+      .toMatchObject({ result: { stopReason: "end_turn" } });
+    expect(reload).toHaveBeenCalledOnce();
     expect(prompt).not.toHaveBeenCalled();
   } finally { await client.close(); }
 });
