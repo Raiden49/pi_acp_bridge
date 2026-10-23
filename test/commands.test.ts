@@ -6,6 +6,12 @@ import { protocolHarness } from "./protocol-harness.js";
 import { createTestRuntime } from "./fixtures.js";
 import { parseBridgeCommand } from "../src/commands.js";
 
+const editorContext = "\n\n" + [
+  "context: renderer=file title=File source=editor project=/workspace\nfile: /workspace/example.ts",
+  "context: renderer=symbol title=Symbol source=editor\nsymbol: example",
+  "context: renderer=snippet title=Selection source=editor\nsnippet:\n```ts\nconst example = 1;\n```",
+].join("\n\n");
+
 test("/session reports session state without sending a model prompt", async () => {
   const prompt = vi.fn(async () => { throw new Error("Model must not be called"); });
   const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => ({
@@ -16,13 +22,41 @@ test("/session reports session state without sending a model prompt", async () =
   }) });
   try {
     const { sessionId } = (await client.request("session/new", { cwd: "/workspace", mcpServers: [] })).result;
-    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/session" }] }))
-      .toMatchObject({ result: { stopReason: "end_turn" } });
-    const { update } = (await client.nextNotification()).params;
-    expect(update.content.text).toContain("pi-session");
-    expect(update.content.text).toContain("620");
-    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/session unexpected" }] }))
-      .toMatchObject({ error: { code: -32602 } });
+    for (const text of ["/session", `/session${editorContext}`]) {
+      expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] }))
+        .toMatchObject({ result: { stopReason: "end_turn" } });
+      const { update } = (await client.nextNotification()).params;
+      expect(update.content.text).toContain("pi-session");
+      expect(update.content.text).toContain("620");
+    }
+    for (const [text, name] of [["/session unexpected", "session"], ["/reload\n\nOrdinary extra text", "reload"]]) {
+      expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] }))
+        .toMatchObject({ error: { code: -32602, message: `Invalid params: Usage: /${name}` } });
+    }
+    expect(prompt).not.toHaveBeenCalled();
+  } finally { await client.close(); }
+});
+
+test("local command arguments exclude editor context appended inside the text block", async () => {
+  const reload = vi.fn(async () => {});
+  const setSessionName = vi.fn();
+  const compact = vi.fn(async (_args?: string) => ({ summary: "fixture", firstKeptEntryId: "fixture", tokensBefore: 100 }));
+  const prompt = vi.fn(async () => { throw new Error("Model must not be called"); });
+  expect(parseBridgeCommand([{ type: "text", text: editorContext }])).toBeUndefined();
+  expect(parseBridgeCommand([{ type: "text", text: "/name A context: renderer=file title" }]))
+    .toEqual({ name: "name", args: "A context: renderer=file title" });
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => ({
+    prompt, reload, setSessionName, compact, subscribe: () => () => {}, abort: async () => {}, dispose() {},
+  }) });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace", mcpServers: [] })).result;
+    for (const command of ["/reload", "/name pi acp bridge修复bug", "/compact", "/compact Keep decisions\nand pending work"]) {
+      expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: command + editorContext }] }))
+        .toMatchObject({ result: { stopReason: "end_turn" } });
+    }
+    expect(reload).toHaveBeenCalledOnce();
+    expect(setSessionName).toHaveBeenCalledExactlyOnceWith("pi acp bridge修复bug");
+    expect(compact.mock.calls).toEqual([[undefined], ["Keep decisions\nand pending work"]]);
     expect(prompt).not.toHaveBeenCalled();
   } finally { await client.close(); }
 });

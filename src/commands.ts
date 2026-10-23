@@ -3,12 +3,14 @@ import type { BridgeSession } from "./sessions.js";
 
 export function parseBridgeCommand(blocks: ContentBlock[]) {
   // Only text blocks invoke commands; attached editor resources are context, not arguments.
-  const text = blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim();
+  // Air/CLion append editor context after a blank line inside the same text block.
+  const text = blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim()
+    .replace(/\r?\n[ \t]*\r?\ncontext: renderer=[\s\S]*$/, "").trim();
   const match = /^\/(session|reload|compact|name)(?:\s+([\s\S]*))?$/.exec(text);
   if (!match) return undefined;
   const name = match[1]!;
   const args = match[2]?.trim() || undefined;
-  if (name !== "compact" && name !== "name" && args) throw RequestError.invalidParams(`Usage: /${name}`);
+  if (name !== "compact" && name !== "name" && args) throw RequestError.invalidParams({}, `Usage: /${name}`);
   return { name, args };
 }
 
