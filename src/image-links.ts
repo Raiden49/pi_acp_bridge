@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-/** Normalize inline local Markdown images without delaying ordinary streamed prose. */
+/** Normalize inline local Markdown images while keeping ordinary prose streaming. */
 export class ImageLinkStream {
   private pending = "";
   private code = "";

@@ -49,6 +49,7 @@ test("keeps native tool images with navigable artifacts and normalizes model-aut
   const client = protocolHarness(".scratch/absent-models.json", { artifactDir, createSession: async () => ({
     subscribe(fn) { listener = fn; return () => {}; }, abort: async () => {}, dispose() {},
     async prompt() {
+      listener({ type: "tool_execution_start", toolCallId: "image", toolName: "read", args: {} });
       listener({ type: "tool_execution_end", toolCallId: "image", toolName: "read", isError: false,
         result: { content: [{ type: "image", data: png, mimeType: "image/png" }], details: {} } });
       for (const delta of ["![robot](/tmp/", "robot.jpg)"]) {
@@ -59,6 +60,7 @@ test("keeps native tool images with navigable artifacts and normalizes model-aut
   try {
     const { sessionId } = (await client.request("session/new", { cwd: artifactDir, mcpServers: [] })).result;
     expect(await client.request("session/prompt", { sessionId, prompt: [] })).toHaveProperty("result");
+    expect((await client.nextNotification()).params.update.sessionUpdate).toBe("tool_call");
     const tool = (await client.nextNotification()).params.update;
     expect(tool.content[0]).toEqual({ type: "content", content: { type: "image", data: png, mimeType: "image/png" } });
     const link = tool.content[1]?.content;

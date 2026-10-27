@@ -29,7 +29,13 @@ function location(path: string, line: number) {
   return { path, line, _meta: { "pi-acp-bridge/uri": pathToFileURL(path).href } };
 }
 
-export function createToolUpdates(cwd: string) {
+export interface FileChange {
+  path: string;
+  oldText: string | null | undefined;
+  newText?: string;
+}
+
+export function createToolUpdates(cwd: string, editorChanges?: Map<string, FileChange>) {
   const files = new Map<string, { path: string; oldText: string | null | undefined }>();
   return (event: AgentSessionEvent): SessionUpdate[] => {
     if (event.type === "tool_execution_start") {
@@ -53,11 +59,13 @@ export function createToolUpdates(cwd: string) {
       for (const block of result.content ?? []) {
         if (block.type === "text" || block.type === "image") content.push({ type: "content", content: block });
       }
-      const file = files.get(event.toolCallId);
+      const editor = event.type === "tool_execution_end" ? editorChanges?.get(event.toolCallId) : undefined;
+      const file = editor ?? files.get(event.toolCallId);
       let locations;
       if (event.type === "tool_execution_end" && file) {
         files.delete(event.toolCallId);
-        const newText = snapshot(file.path);
+        editorChanges?.delete(event.toolCallId);
+        const newText = editor ? editor.newText : snapshot(file.path);
         if (file.oldText !== undefined && typeof newText === "string" && newText !== file.oldText) {
           content.push({ type: "diff", path: file.path, oldText: file.oldText, newText });
           const before = (file.oldText ?? "").split("\n");

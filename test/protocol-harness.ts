@@ -47,6 +47,9 @@ export function protocolHarness(modelsPath: string, options: HarnessOptions = {}
     respond(requestId: number, result: unknown) {
       client.write(JSON.stringify({ jsonrpc: "2.0", id: requestId, result }) + "\n");
     },
+    respondError(requestId: number, error: { code: number; message: string }) {
+      client.write(JSON.stringify({ jsonrpc: "2.0", id: requestId, error }) + "\n");
+    },
     notify(method: string, params: unknown) {
       client.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
     },

@@ -6,7 +6,7 @@
 
 Use [Pi](https://github.com/badlogic/pi-mono) in ACP-compatible IDEs. Built on the Pi TypeScript SDK, with no separate Pi process or background service required.
 
-Supports streaming responses and reasoning, model and Thinking selection, Pi history discovery and resume, tools and file diffs, slash commands, images, native forms, and client-provided MCP servers. UI support varies by client.
+Supports streaming responses and reasoning, model and Thinking selection, Pi history discovery and resume, tools and file diffs, slash commands, images, native forms, and Pi-native plus client-provided MCP servers. UI support varies by client.
 
 ## Quick start
 
@@ -87,11 +87,44 @@ Finish active tasks and ensure the working tree is clean, then run:
 
 This pulls upstream changes, installs locked dependencies, and rebuilds. It does not modify IDE settings, credentials, or chat history.
 
-**Restart the client's agent process afterward.** `/reload` reloads Pi resources, not bridge code.
+Keep `dist/index.js`, `dist/codemode-worker.js`, and `dist/quickjs.wasm` together; the entry file alone is not the complete distribution.
+
+**Restart the client's agent process afterward.** `/reload` reloads Pi resources and local model configuration, not bridge code. Use `/doctor` to check the running artifact's SHA-256, SDK/Node version, profile, and model-refresh status without calling a model.
+
+### Model settings and refresh
+
+- New chats follow Pi CLI startup selection: use the saved default if it is in `enabledModels`, otherwise the first matching scoped model (including its explicit Thinking suffix). With no matching scope, use Pi SDK's normal default/fallback selection.
+- Resumed chats restore their own model and Thinking level; changing Pi's default does not replace the model of an existing chat.
+- After editing Pi model configuration or saving `/scoped-models` in the terminal, send `/reload` in each open ACP chat. It rereads settings, local model catalogs and availability, then publishes the selector again, preserving the current model ID, Thinking level and history. It does not fetch remote catalogs; use `pi update --models` first when needed.
+- An unavailable or missing current model does not hide other valid choices. Select an available model, or fix Pi configuration and use `/reload`; the bridge never silently replaces an existing chat's selection.
+- Merely switching models in a terminal chat does not save a new startup default. Use Pi's **Ctrl+S** in `/model` to save it. Both processes must use the same `PI_CODING_AGENT_DIR`; GUI clients may also have different API-key environment variables.
+
+## Editor buffers and configuration updates
+
+When the client advertises **both** ACP text-file read and write capabilities, the bridge delegates workspace text `read`, `edit`, and `write` operations to the editor. Diffs use the observed editor contents, including client formatting. With either capability missing, these tools keep Pi's original disk behavior; editor request failures never silently fall back to stale disk contents.
+
+Images, paths outside the workspace, Pi profile files, and tools such as `bash`/`grep` still use the local filesystem. This is neither a filesystem sandbox nor a read-only/permission mode. Editor writes need not be saved to disk, and ACP v1 cannot guarantee atomicity against concurrent user edits. `/doctor` reports whether the adapter is loaded.
+
+Embedded text context retains its URI, fragment, MIME type, and supplied link metadata without fetching remote links. Extension-driven model/Thinking changes are published to the IDE at turn settlement only when the configuration changed. See [second-batch implementation references](docs/acp-ide-experience.md) for upstream comparisons and validation limits.
+
+## 会话控制与工具审批
+
+- 支持当前分支末尾 `session/fork`，生成独立 Pi ID 与历史，不替换源聊天、不回滚工作区；暂不支持指定消息位置。客户端须支持 ACP SDK 的实验性分叉接口。
+- 支持已广告的 Claude ACP v1 `_session/steering` 契约，在运行中追加输入；Pi 按工具/模型边界消费，不中断正在执行的工具。空闲时支持 `promptRequired` 由客户端转为普通提示。
+- 新会话默认直接执行。支持配置控件的客户端可通过 **Tool policy** 选择 `ask`（变更前逐次审批）或 `plan`（允许检查/计算入口，阻止写入、shell、MCP 和未知工具）。策略仅属当前会话，恢复与分叉保留；旧式 Thinking 模式不变。
+- Plan 是 Pi 工具执行管线策略，不是 OS 或恶意插件沙箱；可信扩展仍能自行运行宿主代码。拒绝、取消与审批失败不会放行，取消不回滚已发生的修改。
+
+这些控件是否展示取决于客户端，尚未进行本机 Air/JetBrains UI 验收；未实现终端/独立后台任务。上游固定提交、适配差异与测试见 [第三批实现依据](docs/acp-session-controls.md)。
+
+## Native MCP and diagnostics
+
+The bridge loads Pi's native `mcp`, `codemode`, and `tool-search` built-ins with the CLI's named replacement/disable semantics. Pi's user and trusted-project MCP configuration takes priority over IDE-injected servers in the same namespace. ACP-provided env/header values remain literal; SDK configuration, connections, OAuth, reconnection, and shutdown stay with Pi. Use `/mcp` for status and configuration provenance, and `/mcp reconnect <server-name>` to reconnect one server without restarting the others.
+
+`/doctor` reports runtime/build/profile/model diagnostics, startup fallback notices, and local refresh results. It does not call a model, print credential values, or refresh remote catalogs. Paths and model/provider names can still be private; review the report before sharing it. See [protocol and maintenance contracts](docs/protocol.md) and [implementation references](docs/acp-reliability.md).
 
 ## Notes
 
-- Use trusted workspaces only: tools execute through Pi without a filesystem sandbox. A displayed diff is not an approval gate.
+- Use trusted workspaces and extensions only: tools execute through Pi without an OS sandbox. Direct execution remains the default; optional Tool policy applies to Pi tool calls, not arbitrary extension code. A displayed diff is not itself an approval gate.
 - Do not let multiple clients write to the same session history simultaneously. Bridge processes sharing a lease directory reject a second writer; stock Pi CLI does not honor this lease. Stop the ACP agent before resuming in Pi, and exit Pi before loading the session back in ACP.
 - `session/delete` permanently removes the Pi history file and bridge index entry. Air in IDEs 262.8665.497 invokes it from **Done**; `session/close` only releases resources. Generated image assets are retained.
 - See [client compatibility](docs/air-integration.md) for UI limitations and [protocol scope](docs/protocol.md) for supported ACP features.

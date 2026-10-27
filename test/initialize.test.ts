@@ -30,7 +30,7 @@ test("initializes over NDJSON with metadata, supported version and fallback cata
     result: {
       protocolVersion: PROTOCOL_VERSION,
       agentInfo: { name: "pi-acp-bridge", version: "0.1.0" },
-      agentCapabilities: { loadSession: true, promptCapabilities: { image: true, embeddedContext: true } },
+      agentCapabilities: { loadSession: true, promptCapabilities: { image: true, embeddedContext: true }, sessionCapabilities: { fork: {} } },
       authMethods: [],
     },
   });

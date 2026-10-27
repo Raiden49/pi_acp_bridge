@@ -47,9 +47,13 @@ test("real Pi sessions isolate context, history and relative read paths over ACP
       sessionId, prompt: [{ type: "text", text: `Private prompt: ${i === 0 ? "alpha" : "beta"}` }],
     }));
     expect(await Promise.all(prompts)).toEqual(ids.map(() => expect.objectContaining({ result: { stopReason: "end_turn" } })));
-    const notifications = await Promise.all(Array.from({ length: 8 }, () => client.nextNotification()));
-    const chunks = notifications.filter((message) => message.params.update.sessionUpdate === "agent_message_chunk");
-    expect(chunks).toHaveLength(2);
+    const chunks = [];
+    // Configuration/usage updates may interleave across concurrent sessions.
+    // Assert isolation on the assistant output rather than a fixed queue length.
+    while (chunks.length < ids.length) {
+      const message = await client.nextNotification();
+      if (message.params.update.sessionUpdate === "agent_message_chunk") chunks.push(message);
+    }
     for (const chunk of chunks) {
       const i = ids.indexOf(chunk.params.sessionId);
       const own = i === 0 ? "alpha" : "beta";

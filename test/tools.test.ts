@@ -46,7 +46,7 @@ async function toolRun(calls: Array<Pick<Extract<Message["content"][number], { t
     for (;;) {
       const { update } = (await client.nextNotification()).params;
       if (update.sessionUpdate === "agent_message_chunk" && update.content.text === "done") break;
-      updates.push(update);
+      if (update.sessionUpdate !== "usage_update") updates.push(update);
     }
     return { cwd, updates };
   } finally {

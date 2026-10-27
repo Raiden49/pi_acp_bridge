@@ -1,6 +1,41 @@
 import { ModelRuntime, resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
 import { RequestError, type SessionConfigOption, type SessionModeState } from "@agentclientprotocol/sdk";
 import type { BridgeSession } from "./sessions.js";
+import { errorDetail } from "./errors.js";
+
+// The CLI applies enabledModels before SDK startup; the SDK factory alone does not.
+export async function applyInitialModelScope(session: BridgeSession) {
+  const patterns = session.settingsManager?.getEnabledModels();
+  if (!patterns?.length || !session.modelRuntime) return;
+  const { scopedModels } = await resolveModelScopeWithDiagnostics(patterns, session.modelRuntime);
+  const selected = scopedModels.find(({ model }) =>
+    model.provider === session.settingsManager?.getDefaultProvider() && model.id === session.settingsManager?.getDefaultModel()
+  ) ?? scopedModels[0];
+  if (!selected) return;
+  await session.setModel(selected.model, { persist: false });
+  if (selected.thinkingLevel) session.setThinkingLevel(selected.thinkingLevel, { persist: false });
+}
+
+export async function refreshSessionModels(session: BridgeSession) {
+  if (!session.modelRuntime) return;
+  const at = new Date().toISOString();
+  try {
+    const result = await session.modelRuntime.refresh({ allowNetwork: false });
+    if (session.modelRuntime.getError()) throw new RequestError(-32603, "Invalid Pi model configuration or availability refresh; check models.json and credentials");
+    // Refresh endpoint/capability metadata too, without changing the selected model ID.
+    const current = session.model && session.modelRuntime.getModel(session.model.provider, session.model.id);
+    if (current && session.modelRuntime.getAvailableSnapshot().some((model) => model.provider === current.provider && model.id === current.id)) {
+      const thinking = session.thinkingLevel;
+      await session.setModel(current, { persist: false });
+      if (thinking) session.setThinkingLevel(thinking, { persist: false });
+    }
+    if (session.bridgeDiagnostics) session.bridgeDiagnostics.modelRefresh = { at, status: result.errors.size ? "failed" : "success",
+      ...(result.errors.size ? { detail: "部分提供方刷新失败；检查 models.json 与认证配置。" } : {}) };
+  } catch (error) {
+    if (session.bridgeDiagnostics) session.bridgeDiagnostics.modelRefresh = { at, status: "failed", detail: errorDetail(error) };
+    throw error;
+  }
+}
 
 export async function selectableModels(session: BridgeSession) {
   const available = session.modelRuntime?.getAvailableSnapshot() ?? [];
@@ -23,22 +58,29 @@ export async function sessionConfiguration(session: BridgeSession): Promise<{
   configOptions: SessionConfigOption[]; modes?: SessionModeState; warning?: string;
 }> {
   const modes = thinkingModes(session);
-  if (!session.model || !session.modelRuntime) return { configOptions: [], modes };
-  const { models, warning } = await selectableModels(session);
-  const currentValue = `${session.model.provider}/${session.model.id}`;
-  if (!models.some((model) => `${model.provider}/${model.id}` === currentValue)) return { configOptions: [], modes, warning };
+  const approval = session.bridgeApproval?.option();
+  if (!session.modelRuntime) return { configOptions: approval ? [approval] : [], modes };
+  const { models, warning: scopeWarning } = await selectableModels(session);
+  const currentValue = session.model ? `${session.model.provider}/${session.model.id}` : "__pi_no_model__";
+  const currentAvailable = models.some((model) => `${model.provider}/${model.id}` === currentValue);
+  const warning = [scopeWarning, !currentAvailable ? "当前模型不可用或未选择；请选择可用模型。若列表为空，请在 Pi 中检查认证后 /reload。" : undefined].filter(Boolean).join("\n") || undefined;
+  // Keep the actual selection visible, as mature adapters do, instead of hiding
+  // the entire selector. This diagnostic entry never grants model availability.
+  const choices = models.map((model) => ({ value: `${model.provider}/${model.id}`, name: `${model.name} (${model.provider})` }));
+  if (!currentAvailable) choices.unshift({ value: currentValue, name: `${session.model?.name ?? currentValue}（当前不可用，请切换）` });
   const options: SessionConfigOption[] = [{
     id: "model", name: "Model", category: "model", type: "select", currentValue,
     ...(warning ? { description: warning } : {}),
     // Keep labels distinct from wire IDs: Air rejects model names equal to their values.
-    options: models.map((model) => ({ value: `${model.provider}/${model.id}`, name: `${model.name} (${model.provider})` })),
+    options: choices,
   }];
-  if (session.model.reasoning && modes) {
+  if (session.model?.reasoning && modes) {
     options.push({ id: "thinking", name: "Thinking", category: "thought_level", type: "select",
       currentValue: modes.currentModeId,
       options: modes.availableModes.map(({ id }) => ({ value: id, name: id })),
     });
   }
+  if (approval) options.push(approval);
   return { configOptions: options, modes, warning };
 }
 

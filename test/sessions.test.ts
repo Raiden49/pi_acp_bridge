@@ -95,16 +95,16 @@ test.each([false, true])("cancel preserves chunks and allows retry when Pi rejec
   } finally { await client.close(); }
 });
 
-test("prompt errors remove subscriptions, redact details, and allow retry", async () => {
+test("prompt errors preserve diagnostics, redact credentials, and allow retry", async () => {
   const session = fakeSession("/workspace/a");
-  const prompt = vi.spyOn(session, "prompt").mockRejectedValueOnce(new Error("secret-provider-detail"));
+  const prompt = vi.spyOn(session, "prompt").mockRejectedValueOnce(new Error("401 Unauthorized: apiKey=secret-provider-detail"));
   const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => session });
   try {
     const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
     const response = await client.request("session/prompt", {
       sessionId, prompt: [{ type: "text", text: "first" }, { type: "text", text: "second" }],
     });
-    expect(response).toMatchObject({ error: { code: -32603 } });
+    expect(response).toMatchObject({ error: { code: -32603, message: "Pi prompt failed: 401 Unauthorized: apiKey=[REDACTED]" } });
     expect(JSON.stringify(response)).not.toContain("secret-provider-detail");
     expect(prompt).toHaveBeenCalledWith("first\nsecond");
     expect(session.listeners.size).toBe(1);
@@ -112,6 +112,65 @@ test("prompt errors remove subscriptions, redact details, and allow retry", asyn
     await client.nextNotification();
     session.finish();
     expect(await retry).toMatchObject({ result: { stopReason: "end_turn" } });
+  } finally { await client.close(); }
+});
+
+test("model message errors survive event delivery and successful retries clear stale errors", async () => {
+  const session = fakeSession("/workspace/a");
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => session });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
+    for (const recover of [false, true]) {
+      const prompt = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] });
+      await client.nextNotification();
+      const emitEnd = (stopReason: "error" | "stop", errorMessage?: string) => {
+        for (const listener of session.listeners) listener({ type: "message_end",
+          message: { role: "assistant", stopReason, errorMessage },
+        } as Parameters<Parameters<AgentSession["subscribe"]>[0]>[0]);
+      };
+      emitEnd("error", "429 Rate limit exceeded; Authorization: Bearer token-value");
+      if (recover) emitEnd("stop");
+      session.finish();
+      expect(await prompt).toMatchObject(recover ? { result: { stopReason: "end_turn" } } : {
+        error: { message: "Pi prompt failed: 429 Rate limit exceeded; Authorization: [REDACTED]" },
+      });
+    }
+  } finally { await client.close(); }
+});
+
+test.each([true, false])("cancel closes already published tools before the response: actualResult=%s", async (actualResult) => {
+  const session = fakeSession("/workspace/a");
+  const emit = (event: unknown) => { for (const listener of session.listeners) listener(event as Parameters<typeof listener>[0]); };
+  session.abort.mockImplementation(async () => {
+    if (actualResult) emit({ type: "tool_execution_end", toolCallId: "running", toolName: "bash", isError: true,
+      result: { content: [{ type: "text", text: "Process aborted" }] } });
+    session.finish();
+  });
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => session });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] })).result;
+    const prompt = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "work" }] });
+    await client.nextNotification();
+    emit({ type: "tool_execution_start", toolCallId: "running", toolName: "bash", args: { command: "work" } });
+    expect((await client.nextNotification()).params.update.status).toBe("in_progress");
+    client.notify("session/cancel", { sessionId });
+    expect(await prompt).toMatchObject({ result: { stopReason: "cancelled" } });
+    // Cross the same ordered stream: an unclosed tool would leave this sentinel next.
+    await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/name" }] });
+    const ended = (await client.nextNotification()).params.update;
+    expect(ended).toMatchObject({ sessionUpdate: "tool_call_update", toolCallId: "running", status: "failed" });
+    expect(ended.content[0].content.text).toContain(actualResult ? "Process aborted" : "取消");
+  } finally { await client.close(); }
+});
+
+test("session creation errors retain actionable causes without credentials", async () => {
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => {
+    throw new Error("MCP connection refused https://example.invalid?token=private-value");
+  } });
+  try {
+    const response = await client.request("session/new", { cwd: "/workspace/a", mcpServers: [] });
+    expect(response.error.message).toContain("MCP connection refused");
+    expect(JSON.stringify(response)).not.toContain("private-value");
   } finally { await client.close(); }
 });
 

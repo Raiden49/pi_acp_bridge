@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { RequestError } from "@agentclientprotocol/sdk";
-import { SessionIndex } from "./session-index.js";
+import { SessionIndex, type SessionRecord } from "./session-index.js";
 
 export class SessionCatalog {
   constructor(private index: SessionIndex, private sessionDir?: string) {}
@@ -46,7 +46,7 @@ export class SessionCatalog {
     };
   }
 
-  async resolve(id: string) {
+  async resolve(id: string): Promise<(SessionRecord & { id: string }) | undefined> {
     const indexed = await this.index.get(id);
     if (indexed) return { id, ...indexed, sessionFile: resolve(indexed.sessionFile) };
     const found = (await this.scan()).find((entry) => entry.info.id === id || entry.id === id);

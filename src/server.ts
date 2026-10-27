@@ -1,19 +1,24 @@
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { stat, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { decodePrompt, imageLink, toolImageLinks } from "./content.js";
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
-import type { InitializeResponse, StopReason, McpServer, SessionUpdate } from "@agentclientprotocol/sdk";
-import { discoverModels, sessionConfiguration, selectableModels, setThinking } from "./models.js";
+import type { Agent, InitializeResponse, StopReason, McpServer, SessionUpdate, FileSystemCapabilities } from "@agentclientprotocol/sdk";
+import { discoverModels, refreshSessionModels, sessionConfiguration, selectableModels, setThinking } from "./models.js";
+import { bridgeError, errorDetail } from "./errors.js";
+import { doctorReport } from "./diagnostics.js";
 import { createToolUpdates } from "./tool-updates.js";
+import { steeringRequest } from "./steering.js";
+import { ApprovalGate, type ApprovalMode } from "./approvals.js";
+import { ClientFileSystem } from "./client-filesystem.js";
 import { availableCommands, createWorkspaceSession, type BridgeSession } from "./sessions.js";
 import packageInfo from "../package.json" with { type: "json" };
 import { SessionIndex, type SessionRecord } from "./session-index.js";
 import { SessionCatalog } from "./session-catalog.js";
 import { SessionLease } from "./session-lease.js";
-import { replayHistory } from "./history.js";
+import { customMessageUpdates, replayHistory } from "./history.js";
 import { clientMcpEntries } from "./client-mcp.js";
 import { ImageLinkStream } from "./image-links.js";
 import { parseBridgeCommand, sessionReport } from "./commands.js";
@@ -28,11 +33,15 @@ export interface ServerOptions {
   sessionIndexPath?: string;
   sessionDir?: string;
   trace?: (event: Record<string, string | number | boolean>) => void;
-  createSession?: (cwd: string, sessionFile?: string, mcpServers?: McpServer[], sessionId?: string) => Promise<BridgeSession>;
+  createSession?: (cwd: string, sessionFile?: string, mcpServers?: McpServer[], sessionId?: string, fileSystem?: ClientFileSystem, approval?: ApprovalGate) => Promise<BridgeSession>;
 }
 
 interface ActivePrompt {
   cancelled: boolean;
+  acceptingInputs: boolean;
+  inputs: Set<Promise<void>>;
+  inputError?: unknown;
+  flush?: () => Promise<void>;
   unsubscribe: () => void;
   notify?: (text: string) => void;
   update?: (update: SessionUpdate) => Promise<void>;
@@ -47,12 +56,15 @@ interface ManagedSession {
   questions?: Questions;
   unsubscribeMetadata?: () => void;
   lastWarning?: string;
+  configurationSignature?: string;
+  fileSystem?: ClientFileSystem;
   lease?: SessionLease;
 }
 
 export function startServer({ input, output, modelsPath, artifactDir = join(homedir(), "workspace/storage/media/pi-acp-bridge"), sessionIndexPath, sessionDir, trace = () => {}, createSession = createWorkspaceSession }: ServerOptions) {
   const sessions = new Map<string, ManagedSession>();
   const loading = new Set<string>();
+  const forking = new Set<string>();
   const deleting = new Set<string>();
   const closing = new Map<string, Promise<void>>();
   const closingFiles = new Map<string, Promise<void>>();
@@ -63,9 +75,11 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
   const leaseDirectory = join(sessionIndexPath ? dirname(sessionIndexPath) : getAgentDir(), "acp-session-locks");
   let closed = false;
   let elicitationForm = false;
+  let fileSystemCapabilities: FileSystemCapabilities = {};
   function getSession(id: string) {
     const entry = sessions.get(id);
     if (!entry || deleting.has(id)) throw RequestError.invalidParams("Unknown or closed session");
+    if (forking.has(id)) throw new RequestError(-32600, "Session is being forked");
     return entry;
   }
   function openSession<T>(work: () => Promise<T>): Promise<T> {
@@ -76,11 +90,22 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     void pending.then(remove, remove);
     return pending;
   }
-  async function bind(entry: ManagedSession, sessionId: string) {
-    entry.notices = [];
+  async function createWithPolicy(cwd: string, file: string | undefined, servers: McpServer[] | undefined, id: string | undefined, fs: ClientFileSystem) {
+    const approval = new ApprovalGate(connection);
+    const session = await createSession(cwd, file, servers, id, fs, approval);
+    // Custom factories that omit the policy must not advertise unenforced modes.
+    if (approval.installed) session.bridgeApproval = approval;
+    return session;
+  }
+  async function bind(entry: ManagedSession, sessionId: string, fallbackPolicy?: ApprovalMode) {
+    entry.session.bridgeApproval?.bind(sessionId, entry.session.sessionManager, fallbackPolicy);
+    entry.notices = (entry.session.bridgeDiagnostics?.startupNotices ?? []).map(notice => `${errorDetail(notice)}\n`);
     const elicit = elicitationForm ? nativeQuestions(connection, sessionId) : undefined;
     entry.questions = new Questions(elicit && (async (...args) => {
-      if (!entry.active || entry.active.cancelled) throw new Error("Forms require an active prompt");
+      const active = entry.active;
+      if (!active || active.cancelled) throw new Error("Forms require an active prompt");
+      await active.flush?.();
+      if (entry.active !== active || active.cancelled) throw new Error("Form cancelled");
       return elicit(...args);
     }));
     await bindExtensionUI(entry.session, (text) => {
@@ -103,6 +128,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
   async function disposeSession(entry: ManagedSession) {
     if (entry.active) {
       entry.active.cancelled = true;
+      entry.session.bridgeApproval?.cancelTurn();
       entry.active.unsubscribe();
       entry.questions?.cancel();
       const settled = entry.active.settled;
@@ -148,15 +174,18 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       sessionUpdate: "agent_message_chunk", content: { type: "text", text: `${warning}\n` },
     } });
   }
-  async function publishConfiguration(sessionId: string, session: BridgeSession) {
-    const { configOptions, modes, warning } = await sessionConfiguration(session);
+  async function publishConfiguration(sessionId: string, session: BridgeSession,
+    configuration?: Awaited<ReturnType<typeof sessionConfiguration>>, settled = false) {
+    const state = configuration ?? await sessionConfiguration(session);
+    const { configOptions, modes, warning } = state;
     const entry = sessions.get(sessionId);
-    if (!closed && entry?.session === session && !entry.active?.cancelled) {
-      await warnConfiguration(sessionId, entry, warning);
+    if (!closed && entry?.session === session && (!entry.active?.cancelled || settled)) {
+      if (!entry.active?.cancelled) await warnConfiguration(sessionId, entry, warning);
       if (modes) await connection.sessionUpdate({ sessionId, update: {
         sessionUpdate: "current_mode_update", currentModeId: modes.currentModeId,
       } });
       await connection.sessionUpdate({ sessionId, update: { sessionUpdate: "config_option_update", configOptions } });
+      entry.configurationSignature = JSON.stringify(state);
     }
     return configOptions;
   }
@@ -164,6 +193,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     const entry = getSession(sessionId);
     if (entry.active || entry.changingConfiguration) throw new RequestError(-32600, "Session is busy");
     const changing = Promise.resolve().then(() => change(entry.session)).then(async () => {
+      if (entry.session.bridgeApproval) await indexSession(sessionId, entry);
       const configOptions = await publishConfiguration(sessionId, entry.session);
       if (sessions.get(sessionId) === entry && !deleting.has(sessionId)) await publishUsage(sessionId, entry.session);
       return configOptions;
@@ -171,8 +201,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     entry.changingConfiguration = changing.then(() => {}, () => {});
     try { return await changing; }
     catch (error) {
-      if (error instanceof RequestError) throw error;
-      throw new RequestError(-32603, "Unable to update Pi session configuration; check credentials");
+      throw bridgeError("Unable to update Pi session configuration", error);
     } finally { entry.changingConfiguration = undefined; }
   }
   async function leaseRecord(record: SessionRecord & { id: string }, lease: SessionLease) {
@@ -192,11 +221,14 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       if (error.code === "ENOENT") return true;
       throw error;
     });
-    await index.set(sessionId, { cwd: entry.cwd, sessionFile, ...(pending ? { pending: true } : {}) });
+    await index.set(sessionId, { cwd: entry.cwd, sessionFile, ...(pending ? { pending: true } : {}),
+      ...(entry.session.bridgeApproval ? { approvalMode: entry.session.bridgeApproval.mode } : {}),
+    });
   }
   async function advertiseSession(sessionId: string, entry: ManagedSession) {
     const { session } = entry;
-    const { warning, ...configuration } = await sessionConfiguration(session);
+    const state = await sessionConfiguration(session);
+    const { warning, ...configuration } = state;
     if (closed) throw new Error("Connection closed");
     if (session.sessionName) await connection.sessionUpdate({ sessionId, update: {
       sessionUpdate: "session_info_update", title: session.sessionName,
@@ -207,19 +239,22 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       sessionUpdate: "available_commands_update", availableCommands: availableCommands(session),
     } });
     if (closed) throw new Error("Connection closed");
+    entry.configurationSignature = JSON.stringify(state);
     sessions.set(sessionId, entry);
     trace({ event: "session_ready", sessionId });
     return configuration;
   }
-  const connection = new AgentSideConnection((client) => ({
+  let agent: Agent;
+  const connection = new AgentSideConnection((client) => (agent = {
     async initialize(params): Promise<InitializeResponse> {
       elicitationForm = Boolean(params.clientCapabilities?.elicitation?.form);
+      fileSystemCapabilities = params.clientCapabilities?.fs ?? {};
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: "pi-acp-bridge", version: packageInfo.version },
-        agentCapabilities: { loadSession: true, mcpCapabilities: { http: true }, promptCapabilities: { image: true, embeddedContext: true }, sessionCapabilities: { list: {}, close: {}, delete: {} } },
+        agentCapabilities: { loadSession: true, mcpCapabilities: { http: true }, promptCapabilities: { image: true, embeddedContext: true }, sessionCapabilities: { list: {}, close: {}, delete: {}, fork: {} } },
         authMethods: [],
-        _meta: { "pi-acp-bridge/models": await discoverModels(modelsPath) },
+        _meta: { "pi-acp-bridge/models": await discoverModels(modelsPath), steering: { supported: true } },
       };
     },
     newSession: (params) => openSession(async () => {
@@ -229,18 +264,19 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         throw RequestError.invalidParams("Additional directories are not supported");
       }
       clientMcpEntries(params.mcpServers);
+      const fileSystem = new ClientFileSystem(params.cwd, getAgentDir(), client, fileSystemCapabilities);
       let session: BridgeSession;
-      try { session = await createSession(params.cwd, undefined, params.mcpServers); }
+      try { session = await createWithPolicy(params.cwd, undefined, params.mcpServers, undefined, fileSystem); }
       catch (error) {
-        if (error instanceof RequestError) throw error;
-        throw new RequestError(-32603, "Unable to create Pi session; check workspace and Pi configuration");
+        throw bridgeError("Unable to create Pi session", error);
       }
       if (closed) {
         await dispose({ session, cwd: params.cwd });
         throw new RequestError(-32603, "Connection closed");
       }
       const sessionId = session.sessionManager?.getSessionId() ?? randomUUID();
-      const entry: ManagedSession = { session, cwd: params.cwd, lease: new SessionLease(leaseDirectory) };
+      fileSystem.bindSession(sessionId);
+      const entry: ManagedSession = { session, cwd: params.cwd, fileSystem, lease: new SessionLease(leaseDirectory) };
       try {
         if (session.sessionFile) await entry.lease!.acquire(session.sessionFile);
         await bind(entry, sessionId);
@@ -249,24 +285,91 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       } catch (error) {
         sessions.delete(sessionId);
         await dispose(entry);
-        if (error instanceof RequestError) throw error;
-        throw new RequestError(-32603, "Unable to persist or advertise Pi session");
+        throw bridgeError("Unable to persist or advertise Pi session", error);
       }
     }),
     async listSessions({ cwd, cursor }) {
       if (cwd && !isAbsolute(cwd)) throw RequestError.invalidParams("cwd must be absolute");
       try { return await catalog.list(cwd, cursor); }
       catch (error) {
-        if (error instanceof RequestError) throw error;
-        throw new RequestError(-32603, "Unable to list Pi sessions; check history and index");
+        throw bridgeError("Unable to list Pi sessions", error);
       }
     },
+    unstable_forkSession: (params) => openSession(async () => {
+      if (!isAbsolute(params.cwd) || params.additionalDirectories?.length) throw RequestError.invalidParams("Unsupported fork workspace");
+      const air = (params._meta?.jetbrains as { air?: { fork?: unknown } } | undefined)?.air;
+      if (air?.fork !== undefined) throw RequestError.invalidParams("Only branch-tip forks are supported; selected-message fork points are not supported");
+      clientMcpEntries(params.mcpServers ?? []);
+      if (loading.has(params.sessionId) || deleting.has(params.sessionId) || forking.has(params.sessionId) || closing.has(params.sessionId)) {
+        throw new RequestError(-32600, "Session is busy");
+      }
+      const lockedIds = new Set([params.sessionId]);
+      forking.add(params.sessionId);
+      const sourceLease = new SessionLease(leaseDirectory);
+      const forkLease = new SessionLease(leaseDirectory);
+      let forkFile: string | undefined;
+      let forkId: string | undefined;
+      let entry: ManagedSession | undefined;
+      let ownsFork = false;
+      let retained = false;
+      try {
+        let record = await catalog.resolve(params.sessionId);
+        if (!record || record.cwd !== params.cwd) throw RequestError.invalidParams("Unknown session or workspace mismatch");
+        if (record.id !== params.sessionId && (forking.has(record.id) || loading.has(record.id) || deleting.has(record.id) || closing.has(record.id))) {
+          throw new RequestError(-32600, "Session is busy");
+        }
+        lockedIds.add(record.id); forking.add(record.id);
+        const live = [...sessions.entries()].find(([, candidate]) => candidate.session.sessionFile === record!.sessionFile);
+        if (live) {
+          if (live[1].active || live[1].changingConfiguration) throw new RequestError(-32600, "Source session is busy");
+          lockedIds.add(live[0]); forking.add(live[0]);
+        } else {
+          await closingFiles.get(record.sessionFile);
+          record = await leaseRecord(record, sourceLease);
+        }
+        // Open a separate manager: the runtime fork API replaces the source.
+        const snapshot = SessionManager.open(record.sessionFile);
+        const leaf = snapshot.getLeafId();
+        if (!leaf || !snapshot.getBranch().some(item => item.type === "message" && ["user", "assistant"].includes(item.message.role))) {
+          throw RequestError.invalidParams("Cannot fork a session without conversation history");
+        }
+        forkFile = snapshot.createBranchedSession(leaf);
+        forkId = snapshot.getSessionId();
+        if (!forkFile) throw new Error("Pi did not create a persistent fork");
+        await forkLease.acquire(forkFile); ownsFork = true;
+        const fileSystem = new ClientFileSystem(params.cwd, getAgentDir(), client, fileSystemCapabilities);
+        const session = await createWithPolicy(params.cwd, forkFile, params.mcpServers ?? [], undefined, fileSystem);
+        fileSystem.bindSession(forkId);
+        entry = { session, cwd: params.cwd, fileSystem, lease: forkLease };
+        await bind(entry, forkId);
+        await indexSession(forkId, entry);
+        const configuration = await advertiseSession(forkId, entry);
+        retained = true;
+        return { sessionId: forkId, ...configuration };
+      } catch (error) {
+        if (forkId) sessions.delete(forkId);
+        // Keep the fork lease during cleanup; never remove the source or a fork
+        // whose lease belongs to another process.
+        if (entry) { entry.lease = undefined; await dispose(entry); }
+        if (ownsFork && forkId && forkFile) {
+          try {
+            await index.delete(forkId);
+            await unlink(forkFile).catch((cause: NodeJS.ErrnoException) => { if (cause.code !== "ENOENT") throw cause; });
+          } catch { trace({ event: "fork_cleanup_failed" }); }
+        }
+        throw bridgeError("Unable to fork Pi session", error);
+      } finally {
+        sourceLease.release();
+        if (!retained) forkLease.release();
+        for (const id of lockedIds) forking.delete(id);
+      }
+    }),
     loadSession: (params) => openSession(async () => {
       const { sessionId, cwd } = params;
       trace({ event: "session_open", method: "session/load", sessionId });
       if (!isAbsolute(cwd) || params.additionalDirectories?.length) throw RequestError.invalidParams("Unsupported workspace configuration");
       clientMcpEntries(params.mcpServers);
-      if (sessions.has(sessionId) || loading.has(sessionId) || deleting.has(sessionId) || closing.has(sessionId)) throw new RequestError(-32600, "Session already loaded");
+      if (sessions.has(sessionId) || loading.has(sessionId) || forking.has(sessionId) || deleting.has(sessionId) || closing.has(sessionId)) throw new RequestError(-32600, "Session already loaded");
       loading.add(sessionId);
       let session: BridgeSession | undefined;
       let entry: ManagedSession | undefined;
@@ -275,7 +378,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       try {
         const resolved = await catalog.resolve(sessionId);
         if (!resolved || resolved.cwd !== cwd) throw RequestError.invalidParams("Unknown session or workspace mismatch");
-        if ((resolved.id !== sessionId && loading.has(resolved.id)) || deleting.has(resolved.id) || closing.has(resolved.id) || closingFiles.has(resolved.sessionFile) ||
+        if ((resolved.id !== sessionId && loading.has(resolved.id)) || forking.has(resolved.id) || deleting.has(resolved.id) || closing.has(resolved.id) || closingFiles.has(resolved.sessionFile) ||
           [...sessions.values()].some((entry) => entry.session.sessionFile === resolved.sessionFile)) {
           throw new RequestError(-32600, "Session already loaded");
         }
@@ -287,12 +390,14 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           if (error.code === "ENOENT") return true;
           throw error;
         });
-        session = await createSession(cwd, pending ? undefined : record.sessionFile, params.mcpServers, pending ? canonicalId : undefined);
+        const fileSystem = new ClientFileSystem(cwd, getAgentDir(), client, fileSystemCapabilities);
+        session = await createWithPolicy(cwd, pending ? undefined : record.sessionFile, params.mcpServers, pending ? canonicalId : undefined, fileSystem);
+        fileSystem.bindSession(sessionId);
         if (closed) throw new Error("Connection closed");
-        entry = { session, cwd, lease };
+        entry = { session, cwd, lease, fileSystem };
         // Restoring a pending ID can select a new timestamped path. Hold both until close.
         if (session.sessionFile) await lease.acquire(session.sessionFile);
-        await bind(entry, sessionId);
+        await bind(entry, sessionId, record.approvalMode);
         await indexSession(canonicalId, entry);
         for (const update of replayHistory(session)) {
           let presented = await toolImageLinks(update, artifactDir);
@@ -309,8 +414,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       } catch (error) {
         if (session) await dispose(entry ?? { session, cwd, lease });
         else lease.release();
-        if (error instanceof RequestError) throw error;
-        throw new RequestError(-32603, "Unable to load Pi session; check session index and JSONL file");
+        throw bridgeError("Unable to load Pi session", error);
       } finally { loading.delete(sessionId); if (canonicalId) loading.delete(canonicalId); }
     }),
     async setSessionMode(params) {
@@ -319,6 +423,11 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     },
     async setSessionConfigOption(params) {
       const configOptions = await changeConfiguration(params.sessionId, async (session) => {
+        if (params.configId === "approval") {
+          if (!session.bridgeApproval) throw RequestError.invalidParams("Tool policy adapter is not loaded");
+          session.bridgeApproval.setMode(params.value);
+          return;
+        }
         // Air Desktop may persist its legacy modes selector as configId "mode".
         if (params.configId === "thinking" || params.configId === "mode") {
           setThinking(session, params.value);
@@ -335,6 +444,45 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       return { configOptions };
     },
     async authenticate() { throw RequestError.methodNotFound("authenticate"); },
+    async extMethod(method, params) {
+      if (method !== "_session/steering") throw new RequestError(-32601, "Unsupported extension method");
+      const request = steeringRequest(params);
+      const entry = getSession(request.sessionId);
+      const active = entry.active;
+      if (!active) {
+        if (entry.changingConfiguration) throw new RequestError(-32600, "Session configuration is changing");
+        if (request.idleBehavior === "promptRequired") return { outcome: "promptRequired", reason: "noRunningTurn" };
+        parseBridgeCommand(request.prompt);
+        void Promise.resolve(agent.prompt({ sessionId: request.sessionId, prompt: request.prompt })).catch(async (error) => {
+          trace({ event: "steered_prompt_failed" });
+          if (sessions.get(request.sessionId) === entry) {
+            await connection.sessionUpdate({ sessionId: request.sessionId, update: {
+              sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Steered prompt failed: ${errorDetail(error)}` },
+            } }).catch(() => undefined);
+          }
+        });
+        return { outcome: "startedNewTurn" };
+      }
+      if (active.cancelled || !active.acceptingInputs || entry.session.isIdle === true) throw new RequestError(-32600, "Session is cancelling, running a command, or settling");
+      if (parseBridgeCommand(request.prompt)) throw RequestError.invalidParams("Bridge commands cannot be injected into a running turn");
+      const { text, images } = request.decode();
+      // Pi RPC uses this public prompt/preflight hook, including the race where
+      // asynchronous input handlers finish after the previous SDK run settles.
+      return new Promise<Record<string, unknown>>((resolve, reject) => {
+        let accepted = false;
+        const operation = Promise.resolve().then(() => entry.session.prompt(text, {
+          images, streamingBehavior: "steer", source: "rpc", expandPromptTemplates: false,
+          preflightResult: () => {
+            if (active.cancelled || !active.acceptingInputs) { reject(new RequestError(-32600, "Turn is no longer accepting input")); return; }
+            accepted = true; resolve({ outcome: "injected" });
+          },
+        })).catch((error) => {
+          if (accepted) active.inputError = error;
+          reject(bridgeError("Unable to steer Pi session", error));
+        }).finally(() => { active.inputs.delete(operation); });
+        active.inputs.add(operation);
+      });
+    },
     async prompt(params) {
       const started = Date.now();
       trace({ event: "prompt_received", sessionId: params.sessionId, blocks: params.prompt.length });
@@ -353,26 +501,46 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         images: images.length, imageBase64Length: images.reduce((total, image) => total + image.data.length, 0) });
       let finish!: () => void;
       const settled = new Promise<void>((resolve) => { finish = resolve; });
-      const active: ActivePrompt = { cancelled: false, unsubscribe: () => {}, settled };
+      const active: ActivePrompt = { cancelled: false, acceptingInputs: true, inputs: new Set(), unsubscribe: () => {}, settled };
       entry.active = active;
       let stopReason: StopReason = "end_turn";
       let failed = false;
+      let failureDetail: string | undefined;
       let deliveryFailed = false;
       // Pi listeners are synchronous; serialize writes and drain before responding.
       let updates = Promise.resolve();
-      const toolUpdates = createToolUpdates(entry.cwd);
+      entry.fileSystem?.changes.clear();
+      const toolUpdates = createToolUpdates(entry.cwd, entry.fileSystem?.changes);
       const imageLinks = new ImageLinkStream(entry.cwd);
-      function enqueue(task: () => Promise<void>) {
+      // Track only calls actually published to the client, not merely queued.
+      const openTools = new Set<string>();
+      active.flush = async () => {
+        await updates;
+        if (deliveryFailed) throw new Error("Unable to deliver session updates to the ACP client");
+      };
+      entry.session.bridgeApproval?.beginTurn(async toolCallId => {
+        await active.flush!();
+        if (!openTools.has(toolCallId)) throw new Error("Unable to publish tool call before requesting approval");
+      });
+      function enqueue(task: () => Promise<void>, settleTool = false) {
         updates = updates.then(async () => {
-          if (!active.cancelled) await task();
+          if (!closed && sessions.get(params.sessionId) === entry && (!active.cancelled || settleTool)) await task();
         }).catch(() => { deliveryFailed = true; });
         return updates;
       }
       function enqueueUpdate(update: SessionUpdate) {
+        const terminal = update.sessionUpdate === "tool_call_update" && ["completed", "failed"].includes(update.status ?? "");
         return enqueue(async () => {
-          const presented = await toolImageLinks(update, artifactDir);
-          if (!active.cancelled) await client.sessionUpdate({ sessionId: params.sessionId, update: presented });
-        });
+          if (terminal && !openTools.has(update.toolCallId)) return;
+          let presented = await toolImageLinks(update, artifactDir);
+          if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "image") {
+            presented = { ...update, content: await imageLink(update.content, artifactDir) };
+          }
+          if (active.cancelled && !terminal) return;
+          await client.sessionUpdate({ sessionId: params.sessionId, update: presented });
+          if (update.sessionUpdate === "tool_call") openTools.add(update.toolCallId);
+          if (terminal) openTools.delete(update.toolCallId);
+        }, terminal);
       }
       function enqueueText(text: string, sessionUpdate: "agent_message_chunk" | "agent_thought_chunk" = "agent_message_chunk") {
         return text ? enqueueUpdate({ sessionUpdate, content: { type: "text", text } }) : updates;
@@ -391,7 +559,10 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       for (const notice of entry.notices?.splice(0) ?? []) enqueueText(notice);
       try {
         active.unsubscribe = entry.session.subscribe((event) => {
-          if (active.cancelled) return;
+          if (active.cancelled) {
+            if (event.type === "tool_execution_end") for (const update of toolUpdates(event)) enqueueUpdate(update);
+            return;
+          }
           if (event.type === "compaction_start") {
             enqueueText(`正在压缩上下文（${event.reason === "manual" ? "手动" : event.reason === "overflow" ? "上下文超限，准备重试" : "接近上下文上限"}）……\n`);
           } else if (event.type === "compaction_end") {
@@ -411,6 +582,9 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
             enqueueText(sessionUpdate === "agent_message_chunk" ? imageLinks.push(text) : text, sessionUpdate);
           }
           for (const update of toolUpdates(event)) enqueueUpdate(update);
+          if (event.type === "message_end" && event.message.role === "custom") {
+            for (const update of customMessageUpdates(event.message)) enqueueUpdate(update);
+          }
           if (event.type === "message_end" && event.message.role === "assistant") {
             enqueueText(imageLinks.finish());
             // Pi persists message_end after notifying listeners; read usage from the queued task.
@@ -418,6 +592,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
               enqueue(() => refreshUsage());
             }
             failed = event.message.stopReason === "error";
+            failureDetail = failed ? event.message.errorMessage : undefined;
             stopReason = event.message.stopReason === "aborted" ? "cancelled"
               : event.message.stopReason === "length" ? "max_tokens" : "end_turn";
           }
@@ -425,11 +600,14 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         trace({ event: "prompt_dispatched", sessionId: params.sessionId, command: command?.name ?? "model" });
         if (command?.name === "session") {
           enqueueText(sessionReport(entry.session, params.sessionId, entry.cwd));
+        } else if (command?.name === "doctor") {
+          enqueueText(await doctorReport(entry.session, entry.cwd));
         } else if (command?.name === "name") {
           if (command.args) entry.session.setSessionName(command.args);
           enqueueText(entry.session.sessionName ? `会话标题：${entry.session.sessionName}\n` : "用法：/name <标题>\n");
         } else if (command?.name === "reload") {
-          enqueueText("正在重新加载扩展、技能与模板……\n");
+          enqueueText("正在重新加载模型配置、扩展、技能与模板……\n");
+          await refreshSessionModels(entry.session);
           await entry.session.reload();
           enqueueText("重新加载完成；当前聊天历史未切换。\n");
           enqueue(async () => {
@@ -442,10 +620,14 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           await entry.session.compact(command.args);
         } else if (images.length) await entry.session.prompt(text, { images });
         else await entry.session.prompt(text);
+        while (active.inputs.size) await Promise.all([...active.inputs]);
+        active.acceptingInputs = false;
+        if (active.inputError) throw active.inputError;
         enqueueText(imageLinks.finish());
         await updates;
         if (active.cancelled) return { stopReason: "cancelled" as const };
-        if (failed || deliveryFailed) throw new Error("Prompt failed");
+        if (failed) throw new Error(failureDetail || "Model returned an error without details");
+        if (deliveryFailed) throw new Error("Unable to deliver session updates to the ACP client");
         return { stopReason };
       } catch (error) {
         trace({ event: "prompt_failed", sessionId: params.sessionId,
@@ -459,18 +641,39 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
             if (!deliveryFailed) return { stopReason: "end_turn" as const };
           }
         }
-        if (error instanceof RequestError) throw error;
-        throw new RequestError(-32603, command ? `Pi /${command.name} failed; check Pi configuration or extension compatibility` : "Pi prompt failed; check model configuration and credentials");
+        throw bridgeError(command ? `Pi /${command.name} failed` : "Pi prompt failed", error);
       } finally {
+        active.acceptingInputs = false;
+        entry.session.bridgeApproval?.cancelTurn();
+        while (active.inputs.size) await Promise.all([...active.inputs]);
+        if (active.cancelled) entry.session.clearQueue?.();
         active.unsubscribe();
-        // Also refresh after cancellation or a failed turn while the session remains open.
+        entry.fileSystem?.changes.clear();
+        await updates;
+        // Like Claude ACP, settle published foreground tools before ending the
+        // prompt. A missing result is explicitly unknown, never a success.
+        for (const toolCallId of openTools) enqueueUpdate({ sessionUpdate: "tool_call_update", toolCallId, status: "failed",
+          content: [{ type: "content", content: { type: "text", text: active.cancelled
+            ? "操作已取消；工具未报告最终结果，已发生的文件变更不会自动撤销。"
+            : "本轮已结束，但工具未报告最终结果。" } }],
+        });
+        await updates;
+        // Extensions can change configuration outside the bridge's setter paths.
+        // Compare only at settlement, including failed/cancelled turns, not on deltas.
         if (!closed && sessions.get(params.sessionId) === entry && !deleting.has(params.sessionId)) {
-          updates = updates.then(() => refreshUsage()).catch(() => {});
+          updates = updates.then(async () => {
+            const state = await sessionConfiguration(entry.session);
+            if (JSON.stringify(state) !== entry.configurationSignature) {
+              await publishConfiguration(params.sessionId, entry.session, state, true);
+            }
+            await refreshUsage();
+          }).catch(() => { deliveryFailed = true; });
         }
         await updates;
         try {
           if (entry.session.sessionFile && (await index.get(params.sessionId))?.pending) await indexSession(params.sessionId, entry);
         } finally {
+          entry.session.bridgeApproval?.finishTurn();
           if (entry.active === active) entry.active = undefined;
           finish();
           trace({ event: "prompt_settled", sessionId: params.sessionId, durationMs: Date.now() - started,
@@ -482,6 +685,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       const entry = getSession(sessionId);
       if (entry.active) {
         entry.active.cancelled = true;
+        entry.session.bridgeApproval?.cancelTurn();
         entry.questions?.cancel();
         await entry.session.abort();
       }
@@ -492,14 +696,14 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       return {};
     },
     deleteSession: ({ sessionId }) => openSession(async () => {
-      if (loading.has(sessionId) || deleting.has(sessionId)) throw new RequestError(-32600, "Session is busy");
+      if (loading.has(sessionId) || forking.has(sessionId) || deleting.has(sessionId)) throw new RequestError(-32600, "Session is busy");
       deleting.add(sessionId);
       const lease = new SessionLease(leaseDirectory);
       let canonicalId: string | undefined;
       try {
         const record = await catalog.resolve(sessionId);
         const resolvedId = record?.id ?? sessionId;
-        if (resolvedId !== sessionId && (loading.has(resolvedId) || deleting.has(resolvedId))) {
+        if (resolvedId !== sessionId && (loading.has(resolvedId) || forking.has(resolvedId) || deleting.has(resolvedId))) {
           throw new RequestError(-32600, "Session is busy");
         }
         canonicalId = resolvedId;
@@ -518,8 +722,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         if (record) await index.delete(canonicalId);
         return {};
       } catch (error) {
-        if (error instanceof RequestError) throw error;
-        throw new RequestError(-32603, "Unable to delete Pi session; check history and index permissions");
+        throw bridgeError("Unable to permanently delete Pi session", error);
       } finally {
         lease.release();
         deleting.delete(sessionId);

@@ -37,6 +37,22 @@ test("/session reports session state without sending a model prompt", async () =
   } finally { await client.close(); }
 });
 
+test("/doctor reports runtime and configuration provenance without a model call or secrets", async () => {
+  const prompt = vi.fn(async () => { throw new Error("Doctor must not call the model"); });
+  const settingsManager = SettingsManager.inMemory({ defaultProvider: "fixture", defaultModel: "default-model", enabledModels: ["fixture/*"] });
+  const client = protocolHarness(".scratch/absent-models.json", { createSession: async () => ({
+    prompt, settingsManager, subscribe: () => () => {}, abort: async () => {}, dispose() {},
+  }) });
+  try {
+    const { sessionId } = (await client.request("session/new", { cwd: "/workspace", mcpServers: [] })).result;
+    expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: `/doctor${editorContext}` }] }))
+      .toMatchObject({ result: { stopReason: "end_turn" } });
+    const text = (await client.nextNotification()).params.update.content.text;
+    for (const value of ["Node", "Pi SDK", "SHA-256", "settings.json", "default-model", "fixture/*", "永久删除", "/mcp"]) expect(text).toContain(value);
+    expect(prompt).not.toHaveBeenCalled();
+  } finally { await client.close(); }
+});
+
 test("local command arguments exclude editor context appended inside the text block", async () => {
   const reload = vi.fn(async () => {});
   const setSessionName = vi.fn();
@@ -124,7 +140,10 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
       additionalSkillPaths: [resolve(agentDir, "skills")], additionalPromptTemplatePaths: [resolve(agentDir, "prompts")],
       extensionFactories: [(pi) => {
-        pi.registerCommand("hello", { description: "Say hello", handler: async (_args, ctx) => { ctx.ui.notify(ctx.ui.theme.fg("accent", "Hello from extension")); } });
+        pi.registerCommand("hello", { description: "Say hello", handler: async (args, ctx) => {
+          ctx.ui.notify(args === "failure" ? "server: failed https://example.invalid?token=private-status-token"
+            : ctx.ui.theme.fg("accent", "Hello from extension"), "info");
+        } });
         pi.registerCommand("confirm", { handler: async (_args, ctx) => {
           const answer = await ctx.ui.confirm("Confirm", "Proceed?");
           ctx.ui.notify(`Confirmed: ${answer}`);
@@ -139,6 +158,7 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
   try {
     await client.request("initialize", { protocolVersion: 1, clientCapabilities: { elicitation: { form: {} } } });
     const { sessionId } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    expect((await client.nextNotification()).params.update.content.text).toContain("当前模型不可用或未选择");
     const notification = await client.nextNotification();
     expect(notification.params).toMatchObject({ sessionId, update: { sessionUpdate: "available_commands_update" } });
     const commands = notification.params.update.availableCommands;
@@ -146,7 +166,7 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
       { name: "explain", description: "Explain code" }, { name: "hello", description: "Say hello" },
     ]));
     expect(commands.map((command: { name: string }) => command.name).sort()).toEqual(
-      ["session", "reload", "compact", "name", "hello", "confirm", "explain", ...(enableSkillCommands ? ["skill:review"] : [])].sort());
+      ["session", "doctor", "reload", "compact", "name", "hello", "confirm", "explain", ...(enableSkillCommands ? ["skill:review"] : [])].sort());
     if (enableSkillCommands) {
       await writeFile(resolve(agentDir, "prompts/new-template.md"), "---\ndescription: Newly loaded\n---\nNew template");
       expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/reload" }] }))
@@ -160,6 +180,10 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
       expect(refreshed).toContainEqual({ name: "new-template", description: "Newly loaded" });
       await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/hello" }] });
       expect((await client.nextNotification()).params.update.content.text).toBe("Hello from extension\n");
+      await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/hello failure" }] });
+      const status = (await client.nextNotification()).params.update.content.text;
+      expect(status).toContain("server: failed");
+      expect(status).not.toContain("private-status-token");
       for (const accepted of [true, false]) {
         const pending = client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/confirm" }] });
         const form = await client.nextNotification();

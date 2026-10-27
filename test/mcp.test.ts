@@ -2,11 +2,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { protocolHarness } from "./protocol-harness.js";
 import { createTestRuntime, assistantStream } from "./fixtures.js";
-import { clientMcpExtension } from "../src/client-mcp.js";
+import { bridgeBuiltinExtensions, clientMcpExtension } from "../src/client-mcp.js";
 
 const serverScript = `
 import { createInterface } from 'node:readline';
@@ -26,6 +26,7 @@ lines.on('close', () => process.exit(0));
 test.each(["stdio", "http"] as const)("ACP %s MCP tools preserve credentials and close session transports", async (transport) => {
   await mkdir(".scratch", { recursive: true });
   const root = await mkdtemp(resolve(".scratch/mcp-"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", root);
   const script = resolve(root, "server.mjs");
   await writeFile(script, serverScript);
   let httpClosed = false;
@@ -112,5 +113,82 @@ test.each(["stdio", "http"] as const)("ACP %s MCP tools preserve credentials and
     await client.close();
     if (http.listening) { http.closeAllConnections(); await new Promise<void>((resolve) => http.close(() => resolve())); }
     await rm(root, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  }
+});
+
+test("Pi native MCP configuration overrides client names while unrelated literal client servers still work", async () => {
+  await mkdir(".scratch", { recursive: true });
+  const root = await mkdtemp(resolve(".scratch/native-mcp-"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", root);
+  vi.stubEnv("PI_ACP_TEST_MARKER", "native-source");
+  const script = resolve(root, "server.mjs");
+  await writeFile(script, serverScript);
+  await writeFile(resolve(root, "mcp.json"), JSON.stringify({ mcpServers: {
+    "shared-name": { command: process.execPath, args: [script], env: { MARKER: "wrong-global-source" }, exposure: "direct" },
+  } }));
+  await mkdir(resolve(root, ".pi"));
+  await writeFile(resolve(root, ".pi/mcp.json"), JSON.stringify({ mcpServers: {
+    "shared-name": { command: process.execPath, args: [script], env: { MARKER: "${PI_ACP_TEST_MARKER}" }, exposure: "direct" },
+  } }));
+  const runtime = await createTestRuntime(resolve(root, "models.json"));
+  const model = runtime.getModels("anthropic")[0]!;
+  await runtime.setRuntimeApiKey(model.provider, "fixture-key");
+  const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false }, defaultTools: ["+codemode", "+tool_search"] });
+  const loader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager,
+    noSkills: true, noPromptTemplates: true, noThemes: true,
+    extensionFactories: bridgeBuiltinExtensions([
+      { name: "shared_name", command: process.execPath, args: [script], env: [{ name: "MARKER", value: "wrong-client-source" }] },
+      { name: "independent", command: process.execPath, args: [script], env: [{ name: "MARKER", value: "!literal-${UNCHANGED}" }] },
+    ]),
+  });
+  await loader.reload();
+  const { session } = await createAgentSession({ cwd: root, agentDir: root, settingsManager, resourceLoader: loader,
+    modelRuntime: runtime, model, sessionManager: SessionManager.inMemory(root) });
+  const notices: string[] = [];
+  try {
+    await session.bindExtensions({ mode: "rpc", uiContext: { ...session.extensionRunner.getUIContext(), notify: text => { notices.push(text); } } });
+    expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["codemode", "tool_search"]));
+    async function callServer(name: string) {
+      let requested = false;
+      session.agent.streamFunction = () => {
+        if (!requested) {
+          requested = true;
+          return assistantStream(model, [{ type: "toolCall", id: name!,
+            name: name === "independent" ? "codemode" : `mcp__${name}__echo`,
+            arguments: name === "independent" ? { code: "return JSON.parse((await tools.mcp__independent__echo({})).content[0].text);" } : {},
+          }]);
+        }
+        const result = session.messages.findLast(message => message.role === "toolResult");
+        return assistantStream(model, [{ type: "text", text: JSON.stringify(result) }]);
+      };
+      await session.prompt(`Call ${name}`);
+      const result = session.messages.findLast(message => message.role === "toolResult");
+      const text = result?.content.filter(block => block.type === "text").map(block => block.text).join("\n") ?? "";
+      return { text, pid: Number(/"pid":(\d+)/.exec(text)?.[1]) };
+    }
+    const shared = await callServer("shared_name");
+    const independent = await callServer("independent");
+    expect(shared.text).toContain("native-source");
+    expect(independent.text).toContain("!literal-${UNCHANGED}");
+    await session.prompt("/mcp reconnect shared-name");
+    expect(notices.join("\n")).toContain('Reconnected to MCP server "shared-name"');
+    expect(() => process.kill(shared.pid, 0)).toThrow();
+    expect(() => process.kill(independent.pid, 0)).not.toThrow();
+    const reconnected = await callServer("shared_name");
+    expect(reconnected.text).toContain("native-source");
+    expect(reconnected.pid).not.toBe(shared.pid);
+    await session.prompt("/mcp");
+    expect(notices.join("\n")).toContain("overridden");
+    settingsManager.setExtensionPaths(["-builtin:mcp"]);
+    await settingsManager.flush();
+    await session.reload();
+    expect(session.extensionRunner.getRegisteredCommands().some(command => command.invocationName === "mcp")).toBe(false);
+    for (const pid of [reconnected.pid, independent.pid]) expect(() => process.kill(pid, 0)).toThrow();
+  } finally {
+    await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    session.dispose();
+    await rm(root, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   }
 });

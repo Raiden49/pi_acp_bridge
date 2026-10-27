@@ -1,6 +1,5 @@
 import { RequestError, type McpServer } from "@agentclientprotocol/sdk";
-import { createMcpExtension, type ExtensionFactory, type McpServerEntry } from "@earendil-works/pi-coding-agent";
-import { StdioTransport, StreamableHttpTransport } from "@earendil-works/pi-mcp";
+import { createCodemodeExtension, createMcpExtension, createToolSearchExtension, type ExtensionFactory, type InlineExtension, type McpServerEntry } from "@earendil-works/pi-coding-agent";
 
 export function clientMcpEntries(servers: McpServer[]): McpServerEntry[] {
   const names = new Set<string>();
@@ -22,21 +21,31 @@ export function clientMcpEntries(servers: McpServer[]): McpServerEntry[] {
   });
 }
 
+// Match Pi CLI's named, replaceable built-ins so user replacements and
+// -builtin:mcp settings keep their native meaning.
+export function bridgeBuiltinExtensions(servers: McpServer[]): InlineExtension[] {
+  return [
+    { name: "codemode", factory: createCodemodeExtension(), builtin: true, replaceable: true },
+    { name: "tool-search", factory: createToolSearchExtension(), builtin: true, replaceable: true },
+    { name: "mcp", factory: clientMcpExtension(servers), builtin: true, replaceable: true },
+  ];
+}
+
 export function clientMcpExtension(servers: McpServer[]): ExtensionFactory {
   const entries = clientMcpEntries(servers);
-  const extension = createMcpExtension({
-    loadConfig: () => ({ servers: entries, errors: [], autoEnableCodemode: false }),
-    // ACP env and header values are literal, not Pi config interpolation or shell commands.
-    createTransport(entry, cwd) {
-      const config = entry.config;
-      return "command" in config
-        ? new StdioTransport({ command: config.command, args: config.args, env: config.env, cwd })
-        : new StreamableHttpTransport({ url: config.url, headers: config.headers });
-    },
-    updateConfig: () => { throw new Error("Client MCP configuration is managed by the IDE"); },
-  });
+  // Use the SDK's native loader, precedence, OAuth, reconnect and transports.
+  // File configuration wins over registered servers, including '-'/'_' aliases.
+  const extension = createMcpExtension();
+  const literal = (value: string) => value.replaceAll("$", () => "$$").replace(/^!/, "$!");
   const questionTools = new Set(entries.map((entry) => `mcp__${entry.name.replace(/-/g, "_")}__ask_user_question`));
   return async (pi) => {
+    for (const { name, config } of entries) {
+      // Pi's config template escapes preserve ACP's literal values; never
+      // interpret client credentials as !commands or $environment names.
+      pi.registerMcpServer(name, "command" in config
+        ? { ...config, env: Object.fromEntries(Object.entries(config.env ?? {}).map(([key, value]) => [key, literal(value)])) }
+        : { ...config, headers: Object.fromEntries(Object.entries(config.headers ?? {}).map(([key, value]) => [key, literal(value)])) });
+    }
     await extension(pi);
     pi.on("before_agent_start", (event) => {
       // Prefer only tools actually supplied by this client and active after discovery.

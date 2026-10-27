@@ -28,7 +28,7 @@ export function createTestRuntime(modelsPath: string) {
 export async function createBareSession(options: CreateAgentSessionOptions &
   Required<Pick<CreateAgentSessionOptions, "cwd" | "agentDir" | "settingsManager" | "modelRuntime">>) {
   const { cwd, agentDir, settingsManager } = options;
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager,
+  const resourceLoader = options.resourceLoader ?? new DefaultResourceLoader({ cwd, agentDir, settingsManager,
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true });
   await resourceLoader.reload();
   const { session } = await createAgentSession({ ...options, resourceLoader });

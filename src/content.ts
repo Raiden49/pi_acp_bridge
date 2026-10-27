@@ -8,6 +8,12 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 type Image = NonNullable<NonNullable<Parameters<AgentSession["prompt"]>[1]>["images"]>[number];
 
+function contextAttributes(fields: Record<string, string | null | undefined>) {
+  const escape = (value: string) => value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[char]!);
+  return Object.entries(fields).filter(([, value]) => value != null)
+    .map(([key, value]) => `${key}="${escape(value!)}"`).join(" ");
+}
+
 export function decodePrompt(blocks: ContentBlock[]) {
   const text: string[] = [];
   const images: Image[] = [];
@@ -23,8 +29,13 @@ export function decodePrompt(blocks: ContentBlock[]) {
         }
         images.push({ type: "image", data, mimeType });
       } catch { throw RequestError.invalidParams("Image requires base64 data or a readable local file URI"); }
-    } else if (block.type === "resource_link") text.push(`[${block.name}](${block.uri})`);
-    else if (block.type === "resource" && "text" in block.resource) text.push(block.resource.text);
+    } else if (block.type === "resource_link") {
+      text.push(`<resource_link ${contextAttributes({ ref: block.uri, name: block.name, title: block.title, mimeType: block.mimeType, description: block.description })} />`);
+    } else if (block.type === "resource" && "text" in block.resource) {
+      // Like Claude ACP, preserve the supplied reference beside embedded text.
+      // Links are references only: never fetch arbitrary remote resources here.
+      text.push(`<context ${contextAttributes({ ref: block.resource.uri, mimeType: block.resource.mimeType })}>\n${block.resource.text}\n</context>`);
+    }
     else throw RequestError.invalidParams("Unsupported prompt content");
   }
   return { text: text.join("\n"), images };

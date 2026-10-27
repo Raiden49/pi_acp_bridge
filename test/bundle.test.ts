@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -31,7 +32,7 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
     } }));
     await writeFile(resolve(agentDir, "extensions/provider.ts"), `
       import { Type } from '@sinclair/typebox';
-      import { ModelRuntime, resizeImage } from '@earendil-works/pi-coding-agent';
+      import { ModelRuntime, resizeImage, createAgentSession, createCodemodeExtension, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
       import { writeFileSync } from 'node:fs';
       export default function (pi) {
         const schema = Type.String();
@@ -46,6 +47,27 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
           const result = await resizeImage(bytes, 'image/png');
           if (!result || result.width !== 1 || result.height !== 1) throw new Error('Image processing failed');
           writeFileSync(${JSON.stringify(resolve(root, "image-success"))}, 'ok');
+        } });
+        pi.registerCommand('bundle-codemode', { handler: async (_args, ctx) => {
+          try {
+          const settingsManager = SettingsManager.inMemory({ defaultTools: ['+codemode'] });
+          const resourceLoader = new DefaultResourceLoader({ cwd: ctx.cwd, agentDir: ${JSON.stringify(agentDir)}, settingsManager,
+            noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+            extensionFactories: [createCodemodeExtension()] });
+          await resourceLoader.reload();
+          const modelRuntime = await ModelRuntime.create({ modelsPath: ${JSON.stringify(resolve(root, "absent-models.json"))}, refreshOnCreate: false, allowModelNetwork: false });
+          const { session } = await createAgentSession({ cwd: ctx.cwd, settingsManager, resourceLoader, modelRuntime,
+            sessionManager: SessionManager.inMemory(ctx.cwd) });
+          try {
+            await session.bindExtensions({ mode: 'rpc' });
+            // codemode is model-only and cannot recursively call itself through executeTool.
+            const tool = session.extensionRunner.getToolDefinition('codemode');
+            const result = await tool.execute('bundle-check', { code: 'return 6 * 7;' }, undefined, undefined,
+              session.extensionRunner.createToolContext('bundle-check'));
+            if (!result.content.some(block => block.type === 'text' && block.text.includes('42'))) throw new Error(JSON.stringify(result));
+            writeFileSync(${JSON.stringify(resolve(root, "codemode-success"))}, 'ok');
+          } finally { session.dispose(); }
+          } catch (error) { writeFileSync(${JSON.stringify(resolve(root, "codemode-error"))}, error.stack); throw error; }
         } });
         pi.registerCommand('bundle-oauth', { description: 'Verify bundled OAuth', handler: async () => {
           const runtime = await ModelRuntime.create({ authPath: ${JSON.stringify(oauthPath)},
@@ -65,6 +87,8 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
     `);
     const entry = resolve(root, "bridge.mjs");
     await cp("dist/index.js", entry);
+    await cp("dist/codemode-worker.js", resolve(root, "codemode-worker.js"));
+    await cp("dist/quickjs.wasm", resolve(root, "quickjs.wasm"));
     // Reject external module loads even though the fixture lives inside the repo.
     const script = `import { registerHooks, isBuiltin } from 'node:module';
       const entry = ${JSON.stringify(`file://${entry}`)};
@@ -131,12 +155,24 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-image" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });
       expect(await readFile(resolve(root, "image-success"), "utf8")).toBe("ok");
+      expect(await request(11, "session/prompt", {
+        sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-codemode" }],
+      })).toMatchObject({ result: { stopReason: "end_turn" } });
+      expect(await readFile(resolve(root, "codemode-error"), "utf8").catch(() => "")).toBe("");
+      expect(await readFile(resolve(root, "codemode-success"), "utf8")).toBe("ok");
       expect(commands?.params.update.availableCommands.map((command: { name: string }) => command.name))
         .toEqual(expect.arrayContaining(["session", "reload", "compact"]));
       expect(await request(5, "session/prompt", {
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/session" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });
       expect(messages.some((message) => message.params?.update?.content?.text?.includes("Pi 会话"))).toBe(true);
+      expect(await request(12, "session/prompt", {
+        sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/doctor" }],
+      })).toMatchObject({ result: { stopReason: "end_turn" } });
+      const doctor = messages.find(message => message.params?.update?.content?.text?.includes("Pi Bridge 只读诊断"))?.params.update.content.text;
+      expect(doctor).toContain(createHash("sha256").update(bundle).digest("hex"));
+      expect(doctor).toContain(agentDir);
+      expect(doctor).not.toContain("test-only");
       expect(await request(6, "session/prompt", {
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/reload" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });

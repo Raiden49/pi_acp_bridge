@@ -1,4 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
+import { errorDetail } from "./errors.js";
 import { initTheme, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { BridgeSession } from "./sessions.js";
 import type { FormQuestion, Questions } from "./questions.js";
@@ -16,7 +17,7 @@ export async function bindExtensionUI(session: BridgeSession, notify: (text: str
   };
   const uiContext: ExtensionUIContext = {
     ...session.extensionRunner.getUIContext(),
-    notify: (message, type) => notify(`${type === "error" ? "错误：" : ""}${stripVTControlCharacters(message)}\n`),
+    notify: (message, type) => notify(`${type === "error" ? "错误：" : ""}${stripVTControlCharacters(errorDetail(message, 12000))}\n`),
     select: (message, choices, options) => textForm({ kind: "select", message, choices }, options),
     confirm: async (title, message, options) => (await questions.ask({ kind: "confirm", message: `${title}\n\n${message}` }, options)) === true,
     input: (title, placeholder, options) => textForm({ kind: "text", message: `${title}${placeholder ? `\n\n提示：${placeholder}` : ""}` }, options),
@@ -27,6 +28,6 @@ export async function bindExtensionUI(session: BridgeSession, notify: (text: str
     mode: "rpc", uiContext,
     onError: ({ error }) => notify(error === terminalDialogError
       ? "该命令需要终端交互，请在 Pi CLI 中运行。\n"
-      : "扩展执行失败；请检查客户端表单支持或扩展的 ACP/无终端兼容性。\n"),
+      : `扩展执行失败：${stripVTControlCharacters(errorDetail(error))}\n`),
   });
 }

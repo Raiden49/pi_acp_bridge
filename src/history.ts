@@ -1,13 +1,23 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import { sessionEntryToContextMessages, type CustomMessageEntry } from "@earendil-works/pi-coding-agent";
 import type { BridgeSession } from "./sessions.js";
+
+export function customMessageUpdates(message: Pick<CustomMessageEntry, "content" | "display">): SessionUpdate[] {
+  if (!message.display) return [];
+  const blocks = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+  return blocks.map((content) => ({ sessionUpdate: "agent_message_chunk", content }));
+}
 
 export function* replayHistory(session: BridgeSession): Generator<SessionUpdate> {
   // Model context is compacted; the chat transcript must retain earlier turns.
   const messages = session.sessionManager
-    ? session.sessionManager.getBranch().flatMap((entry) => entry.type === "message" ? [entry.message] : [])
+    ? session.sessionManager.getBranch().flatMap((entry) =>
+      entry.type === "message" || entry.type === "custom_message" ? sessionEntryToContextMessages(entry) : [])
     : session.messages ?? [];
   for (const message of messages) {
-    if (message.role === "toolResult") {
+    if (message.role === "custom") {
+      yield* customMessageUpdates(message);
+    } else if (message.role === "toolResult") {
       yield { sessionUpdate: "tool_call_update", toolCallId: message.toolCallId,
         status: message.isError ? "failed" : "completed",
         content: message.content.map((content) => ({ type: "content", content })),

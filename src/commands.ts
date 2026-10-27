@@ -6,7 +6,7 @@ export function parseBridgeCommand(blocks: ContentBlock[]) {
   // Air/CLion append editor context after a blank line inside the same text block.
   const text = blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim()
     .replace(/\r?\n[ \t]*\r?\ncontext: renderer=[\s\S]*$/, "").trim();
-  const match = /^\/(session|reload|compact|name)(?:\s+([\s\S]*))?$/.exec(text);
+  const match = /^\/(session|doctor|reload|compact|name)(?:\s+([\s\S]*))?$/.exec(text);
   if (!match) return undefined;
   const name = match[1]!;
   const args = match[2]?.trim() || undefined;
