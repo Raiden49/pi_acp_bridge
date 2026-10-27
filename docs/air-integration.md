@@ -54,7 +54,7 @@
 ## 第三批会话控制：待客户端人工验收
 
 - Bridge 广告 ACP SDK 的实验性末尾分叉，以及 Claude ACP v1 `_meta.steering.supported`；实际 Air 是否展示入口、发送对应请求，尚未验证。指定消息位置分叉明确拒绝，不默默复制到末尾。
-- 现代 `configOptions` 提供 **Tool policy**（direct/ask/plan）；默认 direct，不改 Pi 全局设置。旧式 modes 与 `mode` 兼容别名仍只管 Thinking，不代表审批策略。控件缺失不代表已自动启用 Plan。
+- 现代 `configOptions` 提供 **Tool policy**（direct/ask/plan）；默认 direct，不改 Pi 全局设置。旧式 modes 同步 direct/ask/plan 工具策略；Thinking 档位仅通过 `thought_level` 配置广告，旧客户端缓存的 Thinking mode ID 仍兼容处理。控件缺失不代表已自动启用 Plan。
 - ask 在潜在变更前发送标准 ACP 审批；Plan 阻止写入、shell 和未知工具，也覆盖 codemode 嵌套调用。它不是任意扩展代码的安全沙箱。审批失败/拒绝/取消不降级直接执行，取消后迟到允许不能放行。
 - `/doctor` 显示实际加载的策略。最小人工验收应覆盖：新建默认 direct；切 Plan 后写入被阻止；切 ask 后批准/拒绝与取消；空白 Plan 会话恢复；末尾分叉源历史不变；生成中追加与空闲 fallback。建议只操作可丢弃文件。
 
@@ -82,8 +82,8 @@
 - **模型列表太多或没有更新**：在 Pi 的 `/scoped-models` 中选择后按 **Ctrl+S** 保存，再执行桥接器 `/reload`。Air Desktop 上旧聊天下拉框仍可能缓存旧值，已验证的办法是新建 Pi Bridge 聊天并发送 `/session`。后端范围更新不等于界面刷新。
 - **模型栏一直显示灰色占位**：Air in IDEs 262.8665.497 会拒绝名称等于模型 ID 的整个配置快照。桥接器已将显示名改为 `model_name (provider)`；升级后重启代理并新建会话验证，不需要清除认证或历史。
 - **模型可见但调用失败**：可用列表反映认证配置，不保证远端凭据有效。先在 Pi 中检查认证和默认提供商；不要复制或迁移认证来猜测修复。
-- **Air Desktop 日志报 `Failed to set config option mode`**：262.1037.6 可能将旧式 Thinking 选择保存为 `configId: "mode"`；桥接器接受它作为 `thinking` 的兼容别名，仍按当前模型校验，不表示权限模式。
-- **Thinking 选项未更新**：桥接器同时提供现代配置与旧式 modes；旧式协议不能动态替换完整档位列表，重新加载会话可重新取得列表。服务器始终按当前模型校验档位。
+- **Air Desktop 日志报 `Failed to set config option mode`**：262.1037.6 可能将旧式 Thinking 选择保存为 `configId: "mode"`；桥接器继续接受旧 Thinking 值并按当前模型校验；direct/ask/plan 值则切换已加载的工具策略。
+- **Thinking 选项未更新**：旧版本把 Thinking 同时放进无法动态替换完整列表的 legacy modes。本次改为仅通过 `thought_level` 配置发布模型实际档位；需重启 agent 并重新加载会话，清除旧 modes 广告。无需删除历史或认证。协议回归已验证完整列表替换，实际 IDE 控件仍需验收。
 - **表单不出现**：客户端须声明 `elicitation.form`。只支持 Pi 的 select/input/editor/confirm；自定义 TUI 和文案中的“多选”不会自动变成复选框。
 - **图片不内嵌显示**：桥接器保留工具原生图片，同时附加文件链接与导航；不保证聊天内预览。图片资产不会自动删除，默认保存在 `~/workspace/storage/media/pi-acp-bridge/`。
 - **没有 Diff**：只捕获 `edit` / `write` 的真实文件变化，不追踪 bash 或脚本中的任意改动。

@@ -31,7 +31,7 @@
 
 ## 工具策略
 
-`configOptions` 新增 `id: "approval"`、名称 **Tool policy**，通过 `session/set_config_option` 切换。旧式 `session/set_mode` 与 `configId: "mode"` 仍只表示 Thinking，不改变兼容语义。
+`configOptions` 新增 `id: "approval"`、名称 **Tool policy**，通过 `session/set_config_option` 切换。传统 `modes` 现在与 direct/ask/plan 工具策略同步，`session/set_mode` 接受这些策略值；不再将模型相关 Thinking 档位放进无法完整动态更新的 legacy modes。旧客户端缓存的 Thinking mode ID 仍可调用兼容入口。迁移依据与回归见 [模型同步修复](acp-model-sync-fix.md)。
 
 | 值 | 行为 |
 | --- | --- |

@@ -44,9 +44,13 @@ test("scoped model choices follow Pi settings, retain the current model and refr
   };
   try {
     const a = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    // Displaying the restored model must not authorize it outside enabledModels.
+    expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "model", value: "scope-test/one" }))
+      .toMatchObject({ error: { code: -32602 } });
+    expect((await client.nextNotification()).params.update.content.text).toContain("范围外");
     expect((await client.nextNotification()).params.update.sessionUpdate).toBe("usage_update");
     await client.nextNotification();
-    expect(choices(a.configOptions)).toEqual(["scope-test/two", "scope-test/one"]);
+    expect(choices(a.configOptions)).toEqual(["scope-test/one", "scope-test/two"]);
     expect(a.configOptions.find((option: any) => option.id === "thinking").currentValue).toBe("medium");
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "model", value: "scope-test/three" }))
       .toMatchObject({ error: { code: -32602 } });
@@ -56,7 +60,10 @@ test("scoped model choices follow Pi settings, retain the current model and refr
       await configure(patterns);
       expect(await client.request("session/prompt", { sessionId: a.sessionId, prompt: [{ type: "text", text: "/reload" }] }))
         .toMatchObject({ result: { stopReason: "end_turn" } });
-      return nextConfiguration();
+      const configuration = await nextConfiguration();
+      // Configuration now arrives before extension/MCP lifecycle work finishes.
+      while ((await client.nextNotification()).params.update.sessionUpdate !== "available_commands_update") {}
+      return configuration;
     };
     expect(choices((await reload(["scope-test/t*", "scope-test/two:high"])).options)).toEqual(["scope-test/two", "scope-test/three"]);
     const unmatched = await reload(["scope-unconfigured/*", "missing/*"]);

@@ -44,11 +44,13 @@ test("native model selector switches the model used by the next prompt without c
     // Air in IDEs rejects the whole preferences snapshot when a model label equals its ID.
     expect(a.configOptions[0].options.every(({ name, value }: { name: string; value: string }) => name.trim() && name !== value)).toBe(true);
     expect(a.configOptions).toContainEqual(expect.objectContaining({ id: "thinking", category: "thought_level" }));
-    expect(a.modes.availableModes).toContainEqual({ id: "high", name: "Thinking: high" });
+    // Thinking uses the replaceable thought_level options, not a stale legacy modes list.
+    expect(a.modes).toBeUndefined();
     const expectConfiguration = async (level: string) => {
-      expect((await client.nextNotification()).params.update).toEqual({ sessionUpdate: "current_mode_update", currentModeId: level });
       const update = (await client.nextNotification()).params.update;
       expect(update.sessionUpdate).toBe("config_option_update");
+      const thinking = update.configOptions.find((option: { id: string }) => option.id === "thinking");
+      if (thinking) expect(thinking.currentValue).toBe(level);
       await expectUsage();
       return update.configOptions;
     };
@@ -79,7 +81,7 @@ test("native model selector switches the model used by the next prompt without c
     const b = (await client.request("session/new", { cwd, mcpServers: [] })).result;
     await expectUsage();
     await client.nextNotification();
-    expect(b.modes.currentModeId).toBe(a.modes.currentModeId);
+    expect(b.modes).toBeUndefined();
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "model", value: ids[1] }))
       .toMatchObject({ result: { configOptions: [expect.objectContaining({ currentValue: ids[1] })] } });
     await expectConfiguration("off");

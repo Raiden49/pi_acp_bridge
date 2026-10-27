@@ -418,12 +418,15 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       } finally { loading.delete(sessionId); if (canonicalId) loading.delete(canonicalId); }
     }),
     async setSessionMode(params) {
-      await changeConfiguration(params.sessionId, (session) => setThinking(session, params.modeId));
+      await changeConfiguration(params.sessionId, (session) => {
+        if (session.bridgeApproval && ["direct", "ask", "plan"].includes(params.modeId)) session.bridgeApproval.setMode(params.modeId);
+        else setThinking(session, params.modeId); // Compatibility for previously advertised Thinking modes.
+      });
       return {};
     },
     async setSessionConfigOption(params) {
       const configOptions = await changeConfiguration(params.sessionId, async (session) => {
-        if (params.configId === "approval") {
+        if (params.configId === "approval" || (params.configId === "mode" && ["direct", "ask", "plan"].includes(String(params.value)))) {
           if (!session.bridgeApproval) throw RequestError.invalidParams("Tool policy adapter is not loaded");
           session.bridgeApproval.setMode(params.value);
           return;
@@ -438,8 +441,8 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         }
         const { models } = await selectableModels(session);
         const model = models.find((candidate) => `${candidate.provider}/${candidate.id}` === params.value);
-        if (!model) throw RequestError.invalidParams("Unknown, unavailable or out-of-scope model");
-        await session.setModel(model);
+        if (!model) throw RequestError.invalidParams(undefined, "Unknown, unavailable or out-of-scope model");
+        await session.setModel(model, { persist: false });
       });
       return { configOptions };
     },
@@ -559,6 +562,10 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       for (const notice of entry.notices?.splice(0) ?? []) enqueueText(notice);
       try {
         active.unsubscribe = entry.session.subscribe((event) => {
+          // Metadata only: distinguish provider/tool/retry waits without logging prompts or arguments.
+          if (["agent_start", "message_start", "tool_execution_start", "tool_execution_end", "auto_retry_start", "agent_settled"].includes(event.type)) {
+            trace({ event: "sdk_event", sessionId: params.sessionId, type: event.type });
+          }
           if (active.cancelled) {
             if (event.type === "tool_execution_end") for (const update of toolUpdates(event)) enqueueUpdate(update);
             return;
@@ -607,14 +614,31 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           enqueueText(entry.session.sessionName ? `会话标题：${entry.session.sessionName}\n` : "用法：/name <标题>\n");
         } else if (command?.name === "reload") {
           enqueueText("正在重新加载模型配置、扩展、技能与模板……\n");
-          await refreshSessionModels(entry.session);
-          await entry.session.reload();
+          let configurationPublished = false;
+          const syncConfiguration = async (force = false) => {
+            const state = await sessionConfiguration(entry.session);
+            if (force || JSON.stringify(state) !== entry.configurationSignature) {
+              await publishConfiguration(params.sessionId, entry.session, state);
+              await publishUsage(params.sessionId, entry.session);
+              configurationPublished = true;
+            }
+          };
+          // Let Pi reload settings itself: it needs the old defaultTools to compute additions.
+          trace({ event: "reload_stage", sessionId: params.sessionId, stage: "resources" });
+          await entry.session.reload({ beforeSessionStart: async () => {
+            // Providers have now been re-registered. Refresh once, before MCP startup.
+            await refreshSessionModels(entry.session);
+            await enqueue(syncConfiguration);
+            enqueueText("模型配置与资源已刷新；正在启动扩展与连接 MCP……\n");
+            trace({ event: "reload_stage", sessionId: params.sessionId, stage: "session_start" });
+          } });
+          trace({ event: "reload_stage", sessionId: params.sessionId, stage: "complete" });
           enqueueText("重新加载完成；当前聊天历史未切换。\n");
           enqueue(async () => {
             await client.sessionUpdate({ sessionId: params.sessionId, update: {
               sessionUpdate: "available_commands_update", availableCommands: availableCommands(entry.session),
             } });
-            await publishConfiguration(params.sessionId, entry.session);
+            await syncConfiguration(!configurationPublished);
           });
         } else if (command?.name === "compact") {
           await entry.session.compact(command.args);

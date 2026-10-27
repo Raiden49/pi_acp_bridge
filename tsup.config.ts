@@ -38,8 +38,13 @@ export default defineConfig({
       build.onLoad({ filter: /[/\\]pi-coding-agent[/\\]dist[/\\]config\.js$/ }, async ({ path }) => {
         const source = await readFile(path, "utf8");
         const lookup = 'createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm")';
-        if (!source.includes(lookup)) throw new Error("Pi QuickJS lookup changed; update the standalone asset adapter");
-        return { contents: source.replace(lookup, 'fileURLToPath(new URL("./quickjs.wasm", import.meta.url))'), loader: "js", resolveDir: dirname(path) };
+        const versionExport = 'export const VERSION = pkg.version || "0.0.0";';
+        if (!source.includes(lookup) || !source.includes(versionExport)) throw new Error("Pi config changed; update the standalone asset/version adapter");
+        // Once bundled, Pi's upward package lookup finds the Bridge package instead.
+        const sdkPackage = JSON.parse(await readFile(join(dirname(path), "../package.json"), "utf8"));
+        if (sdkPackage.name !== "@earendil-works/pi-coding-agent" || !sdkPackage.version) throw new Error("Cannot identify bundled Pi SDK");
+        return { contents: source.replace(lookup, 'fileURLToPath(new URL("./quickjs.wasm", import.meta.url))')
+          .replace(versionExport, `export const VERSION = ${JSON.stringify(sdkPackage.version)};`), loader: "js", resolveDir: dirname(path) };
       });
     },
   }, {

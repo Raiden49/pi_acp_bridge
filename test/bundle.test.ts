@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { expect, test } from "vitest";
+import { VERSION as sdkVersion } from "@earendil-works/pi-coding-agent";
 
 const exec = promisify(execFile);
 
@@ -172,6 +173,7 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
       const doctor = messages.find(message => message.params?.update?.content?.text?.includes("Pi Bridge 只读诊断"))?.params.update.content.text;
       expect(doctor).toContain(createHash("sha256").update(bundle).digest("hex"));
       expect(doctor).toContain(agentDir);
+      expect(doctor).toContain(`Pi SDK：${sdkVersion}`);
       expect(doctor).not.toContain("test-only");
       expect(await request(6, "session/prompt", {
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/reload" }],
@@ -192,8 +194,8 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
       expect(await request(10, "session/set_mode", {
         sessionId: session.result.sessionId, modeId: "low",
       })).toMatchObject({ result: {} });
-      expect(messages.some((message) => message.params?.update?.sessionUpdate === "current_mode_update"
-        && message.params.update.currentModeId === "low")).toBe(true);
+      expect(messages.some((message) => message.params?.update?.sessionUpdate === "config_option_update"
+        && message.params.update.configOptions.some((option: { id: string; currentValue: string }) => option.id === "thinking" && option.currentValue === "low"))).toBe(true);
       expect(await request(9, "session/prompt", {
         sessionId: session.result.sessionId, prompt: [{ type: "text", text: "/bundle-question" }],
       })).toMatchObject({ result: { stopReason: "end_turn" } });
@@ -206,6 +208,8 @@ test("standalone production bundle loads extensions, derives OAuth auth and clea
         .map((line) => JSON.parse(line.slice("[pi-acp-bridge] ".length)));
       expect(trace).toContainEqual(expect.objectContaining({ event: "prompt_received", sessionId: session.result.sessionId }));
       expect(trace).toContainEqual(expect.objectContaining({ event: "prompt_settled" }));
+      expect(trace.filter(event => event.event === "reload_stage").map(event => event.stage))
+        .toEqual(["resources", "session_start", "complete"]);
       const diagnostic = JSON.stringify(trace);
       for (const secret of ["fixture-access", "fixture-refresh", "confirmed", "/bundle-question", root]) expect(diagnostic).not.toContain(secret);
       expect(() => process.kill(Number(pid), 0)).toThrow();

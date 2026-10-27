@@ -47,54 +47,50 @@ export async function selectableModels(session: BridgeSession) {
   const { scopedModels, diagnostics } = await resolveModelScopeWithDiagnostics(patterns, snapshot);
   const models = scopedModels.map(({ model }) => model);
   const warning = !models.length
-    ? "enabledModels 未匹配任何可用模型；仅保留仍可用的当前模型。请在 Pi /scoped-models 中调整范围后 /reload。"
+    ? "enabledModels 未匹配任何可用模型；不会自动扩大范围。请在 Pi /scoped-models 中调整范围后 /reload。"
     : diagnostics.length ? "enabledModels 中部分规则未匹配或包含无效 Thinking 后缀；请检查 Pi 的模型范围配置。" : undefined;
-  const current = available.find((model) => model.provider === session.model?.provider && model.id === session.model.id);
-  if (current && !models.includes(current)) models.push(current);
   return { models, warning };
 }
 
 export async function sessionConfiguration(session: BridgeSession): Promise<{
   configOptions: SessionConfigOption[]; modes?: SessionModeState; warning?: string;
 }> {
-  const modes = thinkingModes(session);
   const approval = session.bridgeApproval?.option();
+  // Legacy modes represent work/permission policy, never model-dependent effort.
+  const modes: SessionModeState | undefined = approval?.type === "select" ? {
+    currentModeId: approval.currentValue,
+    availableModes: approval.options.flatMap(option => "value" in option
+      ? [{ id: option.value, name: option.name }]
+      : option.options.map(({ value, name }) => ({ id: value, name }))),
+  } : undefined;
   if (!session.modelRuntime) return { configOptions: approval ? [approval] : [], modes };
   const { models, warning: scopeWarning } = await selectableModels(session);
   const currentValue = session.model ? `${session.model.provider}/${session.model.id}` : "__pi_no_model__";
   const currentAvailable = models.some((model) => `${model.provider}/${model.id}` === currentValue);
-  const warning = [scopeWarning, !currentAvailable ? "当前模型不可用或未选择；请选择可用模型。若列表为空，请在 Pi 中检查认证后 /reload。" : undefined].filter(Boolean).join("\n") || undefined;
+  const warning = [scopeWarning, !currentAvailable ? "当前模型不可用、在范围外或未选择；请选择范围内的可用模型。若列表为空，请检查 Pi 认证及 enabledModels 后 /reload。" : undefined].filter(Boolean).join("\n") || undefined;
   // Keep the actual selection visible, as mature adapters do, instead of hiding
   // the entire selector. This diagnostic entry never grants model availability.
   const choices = models.map((model) => ({ value: `${model.provider}/${model.id}`, name: `${model.name} (${model.provider})` }));
-  if (!currentAvailable) choices.unshift({ value: currentValue, name: `${session.model?.name ?? currentValue}（当前不可用，请切换）` });
+  if (!currentAvailable) choices.unshift({ value: currentValue, name: `${session.model?.name ?? currentValue}（当前不可用或范围外，请切换）` });
   const options: SessionConfigOption[] = [{
     id: "model", name: "Model", category: "model", type: "select", currentValue,
     ...(warning ? { description: warning } : {}),
     // Keep labels distinct from wire IDs: Air rejects model names equal to their values.
     options: choices,
   }];
-  if (session.model?.reasoning && modes) {
+  if (session.model?.reasoning && session.thinkingLevel) {
     options.push({ id: "thinking", name: "Thinking", category: "thought_level", type: "select",
-      currentValue: modes.currentModeId,
-      options: modes.availableModes.map(({ id }) => ({ value: id, name: id })),
+      currentValue: session.thinkingLevel,
+      options: session.getAvailableThinkingLevels().map(value => ({ value, name: value })),
     });
   }
   if (approval) options.push(approval);
   return { configOptions: options, modes, warning };
 }
 
-function thinkingModes(session: BridgeSession): SessionModeState | undefined {
-  if (!session.model || !session.thinkingLevel) return undefined;
-  return {
-    currentModeId: session.thinkingLevel,
-    availableModes: session.getAvailableThinkingLevels().map((id) => ({ id, name: `Thinking: ${id}` })),
-  };
-}
-
 export function setThinking(session: BridgeSession, value: unknown) {
   const level = session.getAvailableThinkingLevels().find((level) => level === value);
-  if (!session.model || !level) throw RequestError.invalidParams("Unsupported thinking level for current model");
+  if (!session.model || !level) throw RequestError.invalidParams(undefined, "Unsupported thinking level for current model");
   session.setThinkingLevel(level, { persist: false });
 }
 

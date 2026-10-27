@@ -37,6 +37,7 @@ async function fixture(tool = "write") {
   const created = await client.request("session/new", { cwd: root, mcpServers: [] });
   const { sessionId } = created.result;
   expect(created.result.configOptions).toContainEqual(expect.objectContaining({ id: "approval", currentValue: "direct" }));
+  expect(created.result.modes.availableModes.map((mode: { id: string }) => mode.id)).toEqual(["direct", "ask", "plan"]);
   return { client, root, target, sessionId, toolResult: () => toolResult, async cleanup() { await client.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -45,11 +46,13 @@ for (const [mode, decision, written, tool] of [["direct", undefined, true, "writ
   test(`${mode}/${decision ?? "no dialog"} controls SDK ${tool}`, async () => {
     const f = await fixture(tool);
     try {
-      if (mode !== "direct") expect(await f.client.request("session/set_config_option", { sessionId: f.sessionId, configId: "approval", value: mode })).toHaveProperty("result");
+      if (mode === "plan") expect(await f.client.request("session/set_mode", { sessionId: f.sessionId, modeId: mode })).toHaveProperty("result");
+      else if (mode !== "direct") expect(await f.client.request("session/set_config_option", { sessionId: f.sessionId, configId: "approval", value: mode })).toHaveProperty("result");
       if (mode === "plan") {
         await f.client.request("session/close", { sessionId: f.sessionId });
         const pending = await f.client.request("session/load", { sessionId: f.sessionId, cwd: f.root, mcpServers: [] });
         expect(pending.result.configOptions).toContainEqual(expect.objectContaining({ id: "approval", currentValue: "plan" }));
+        expect(pending.result.modes.currentModeId).toBe("plan");
       }
       const response = f.client.request("session/prompt", { sessionId: f.sessionId, prompt: [{ type: "text", text: "make a change" }] });
       if (decision) {

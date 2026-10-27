@@ -14,7 +14,7 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 | `session/fork` | SDK 实验性接口；复制空闲持久化会话当前分支到新 ID/JSONL，不替换源会话、不回滚文件；明确拒绝指定消息位置 |
 | `_session/steering` | 可选 v1 扩展；由 `_meta.steering.supported` 广告，运行中接入 Pi 输入管线，空闲支持 promptRequired 或兼容性启动提示 |
 | `session/set_config_option` | 切换会话模型、Thinking 或 `approval` 工具策略 |
-| `session/set_mode` | Thinking 的旧式兼容入口，不表示权限或 Plan 模式 |
+| `session/set_mode` | 广告的模式为 direct/ask/plan 工具策略；旧 Thinking 值保留兼容入口 |
 | `session/cancel` | 中止活动提示，保留会话及已产生的历史和文件变更 |
 | `session/close` | 清理资源，不删除历史 |
 | `session/delete` | 清理资源后永久删除已知会话的 Pi JSONL 与桥接索引项；目标已不存在时幂等成功 |
@@ -29,7 +29,7 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 - `configOptions` 的 `approval` 可选 direct（默认）、ask（逐次批准可能变更的工具）、plan（只允许 read/grep/find/ls、codemode 容器与 tool_search）。Plan 阻止所有 shell、edit/write、MCP 和未知工具；嵌套调用走相同 Pi `tool_call` 拦截，不依靠提示词或 shell 文本猜测。
 - 审批先发布对应工具，再发标准 `session/request_permission`，仅提供 allow_once/reject_once；取消、拒绝、RPC 失败或迟到批准不能放行，不保存永久授权。SDK cancellationSignal 负责通知客户端，额外本地 abort race 避免客户端不回应时挂住提示。
 - 策略保存在原生分支 custom entry；索引 approvalMode 为尚未落盘/setup-only 会话的恢复后备，避免空白 Plan 会话关闭恢复后降级。原生分支记录优先，分叉继承；不修改 Pi 全局设置。未加载执行拦截器时不广告策略选项。
-- 可信扩展可运行任意宿主代码和替换同名工具，因此不是 OS/插件安全沙箱；Plan 只约束正常 Pi 工具管线。取消不撤销已发生的变更。旧式 modes/`mode` 仍仅为 Thinking。
+- 可信扩展可运行任意宿主代码和替换同名工具，因此不是 OS/插件安全沙箱；Plan 只约束正常 Pi 工具管线。取消不撤销已发生的变更。旧式 `modes` 与 `approval` 工具策略保持一致；旧客户端缓存的 Thinking mode ID 仍兼容处理，但不再广告为工作模式。
 
 依据、完整边界和测试见 [第三批实现对标](acp-session-controls.md)。实际 IDE 入口、选择器与审批 UI 尚须人工验收。
 
@@ -37,9 +37,9 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 
 - 标准下拉框来自 new/load 的 `configOptions`。模型 ID 为 `provider/id`，显示标签为 `model_name (provider)`，使用 Pi 提供的显示名称（Air in IDEs 拒绝与 ID 完全相同的名称），仅选取 Pi 认证可用快照中的模型；快照不保证远端调用成功。
 - Pi 合并设置中的 `enabledModels` 限制选择范围，复用 SDK 的匹配、顺序与去重规则。空范围展示全部可用模型；范围外但仍可用的当前模型追加保留；无匹配时警告且不放宽到全量。筛选本身不刷新认证或访问网络。
-- 没有消息的新会话按 CLI 范围启动：保存的默认模型在范围内时优先，否则使用第一个匹配模型，并应用该项显式 Thinking 后缀；无匹配时保留 SDK 默认/fallback，不放宽范围。恢复已有对话不套用新默认。模型或 Thinking 切换只影响当前会话，不修改全局默认；Pi `/model` 的 Ctrl+S 才保存启动默认。
-- reasoning 模型提供 `thought_level` 配置；同时广告 `modes`，两条接口共用校验。修改后发送 `current_mode_update` 与 `config_option_update`。每轮提示结算时还比较完整配置快照，扩展改变模型/Thinking/目录可用性后按变化发布；无变化不重复发送，不按 delta 广播。失败/取消结算仍可同步配置元数据，但关闭的会话不再发布。
-- 当前模型缺失或不可用时，保留明确标注的诊断项和其他可选模型，不自动替换当前选择或伪造认证可用性。`__pi_no_model__` 仅是“未选择模型”占位，不是可调用模型；当前模型声明支持 reasoning 且提供档位时保留 Thinking 选项；模型诊断项不因此变成可调用模型。
+- 没有消息的新会话按 CLI 范围启动：保存的默认模型在范围内时优先，否则使用第一个匹配模型，并应用该项显式 Thinking 后缀；无匹配时保留 SDK 默认/fallback，不放宽范围。成功恢复已有模型时不套用新默认；SDK 明确报告恢复失败时，重新按 CLI 范围规则选择，而不是保留其忽略 scope 的 fallback。模型或 Thinking 切换只影响当前会话，不修改全局默认；Pi `/model` 的 Ctrl+S 才保存启动默认。
+- reasoning 模型仅通过 `thought_level` 配置广告档位，直接使用 Pi 当前模型的能力，不硬编码供应商/模型名称。`modes` 只广告已加载执行适配的工具策略；`current_mode_update` 表示工具策略，不再广播 Thinking。模型切换后 `config_option_update` 携带完整配置与新档位列表。每轮提示结算时还比较完整配置快照，扩展改变模型/Thinking/目录可用性后按变化发布；无变化不重复发送，不按 delta 广播。失败/取消结算仍可同步配置元数据，但关闭的会话不再发布。
+- 当前模型缺失、不可用或在范围外时，保留明确标注的诊断项和其他可选模型。诊断展示不加入可选集合，设置模型时仍拒绝范围外值；scope 无匹配时不扩大集合。成功恢复的历史模型不会因此自动切换，也不伪造认证可用性。`__pi_no_model__` 仅是“未选择模型”占位，不是可调用模型；当前模型声明支持 reasoning 且提供档位时保留 Thinking 选项；模型诊断项不因此变成可调用模型。
 - `initialize._meta["pi-acp-bridge/models"]` 是独立的完整发现目录，内容仅有 ID 与名称，不过滤认证，不填充 IDE 下拉框。发现过程不联网、不解析秘密命令、不写认证；无效配置返回脱敏错误。
 
 ## 命令与表单
@@ -49,7 +49,7 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 | `/session` | 显示会话、历史路径、模型、用量和上下文估计，不请求模型 |
 | `/doctor` | 只读诊断运行构建指纹、SDK/Node、profile/路径、模型范围/刷新、配置来源与 MCP 入口，不请求模型 |
 | `/name [标题]` | 查询或设置 Pi 标题；Pi → IDE 单向同步，不实现 IDE 改名反写 |
-| `/reload` | 从本地刷新模型目录/认证可用快照，重载设置、资源与 MCP 并重新发布命令/配置；保留模型 ID、Thinking 和历史，不联网拉目录、不加载新版 Bridge 或外部历史 |
+| `/reload` | 由 SDK 重载设置与扩展；使用其 `beforeSessionStart` 在 provider 注册完成、MCP 启动前本地刷新模型能力并发布变化的配置；最后发布命令与配置。保留模型 ID、兼容的 Thinking 和历史，不联网拉目录、不加载新版 Bridge 或外部历史 |
 | `/compact [摘要要求]` | 调用 Pi 压缩，通常产生模型费用，支持取消 |
 
 命令还包括 Pi 实际加载的扩展、模板与已启用技能。桥接内置命令只从直接文本读取命令及参数，不从嵌入文档触发；执行内置命令时忽略附带的编辑器资源、链接和图片，不读取或解码附件；同一文本块中由空行及 `context: renderer=` 引出的 Air/CLion 上下文后缀不参与命令参数解析。普通额外文本仍按原有参数规则处理，错误消息包含具体用法提示。
@@ -108,6 +108,7 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 - `PI_BUNDLED_NODE=true`：启用 Pi 内嵌扩展模块加载器。
 - 静态 OAuth loaders：避免动态相对导入在 bundle 旁查找缺失模块。
 - 内嵌 Photon WASM：使图片处理不依赖外部文件。
+- SDK `VERSION`：构建时从被捆绑的 SDK package 读取并固化公开常量，避免运行时向上查到 Bridge 的 package.json。替换特征改变则构建失败；独立包测试核对诊断版本。
 - 独立 `codemode-worker.js`：遵循 Pi Node 构建方式，worker 必须自包含、不得引入 `import.meta`/createRequire banner，以支持 SDK data URL 启动。
 - `quickjs.wasm` sidecar：主 bundle 从自身旁边读取，不回退依赖开发机 `node_modules`；构建适配检查 SDK loader 特征，升级不匹配时明确失败。
 - 保留 `node:` 前缀：防止将 `node:sqlite` 错当外部包。

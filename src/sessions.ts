@@ -62,7 +62,16 @@ export async function createWorkspaceSession(cwd: string, sessionFile?: string, 
   const bridge: BridgeSession = session;
   bridge.bridgeDiagnostics = { agentDir, startupNotices: modelFallbackMessage ? [modelFallbackMessage] : [] };
   try {
-    if (!sessionManager.buildSessionContext().messages.length) await applyInitialModelScope(session);
+    // Preserve a successfully restored selection, not an SDK fallback that ignored scope.
+    if (!sessionManager.buildSessionContext().messages.length || modelFallbackMessage) {
+      await applyInitialModelScope(session);
+    }
+    if (modelFallbackMessage && session.model) {
+      bridge.bridgeDiagnostics.startupNotices = [
+        `SDK 启动恢复记录（历史事件）：${modelFallbackMessage}`,
+        `Bridge 启动选择：${session.model.provider}/${session.model.id}；模型范围未扩大。`,
+      ];
+    }
     return bridge;
   } catch (error) {
     session.dispose();

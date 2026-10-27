@@ -158,7 +158,7 @@ test.each([true, false])("advertises loaded prompt templates, extensions and ena
   try {
     await client.request("initialize", { protocolVersion: 1, clientCapabilities: { elicitation: { form: {} } } });
     const { sessionId } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
-    expect((await client.nextNotification()).params.update.content.text).toContain("当前模型不可用或未选择");
+    expect((await client.nextNotification()).params.update.content.text).toContain("当前模型不可用");
     const notification = await client.nextNotification();
     expect(notification.params).toMatchObject({ sessionId, update: { sessionUpdate: "available_commands_update" } });
     const commands = notification.params.update.availableCommands;

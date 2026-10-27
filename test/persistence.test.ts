@@ -41,12 +41,12 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
   let client = protocolHarness(resolve(agentDir, "models.json"), options);
   try {
     const expectUsage = async () => expect((await client.nextNotification()).params.update.sessionUpdate).toBe("usage_update");
-    const { sessionId, modes } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
+    const { sessionId } = (await client.request("session/new", { cwd, mcpServers: [] })).result;
     await expectUsage();
     await client.nextNotification();
     expect(await client.request("session/set_mode", { sessionId, modeId: "high" })).toMatchObject({ result: {} });
-    expect((await client.nextNotification()).params.update).toMatchObject({ currentModeId: "high" });
     const { configOptions } = (await client.nextNotification()).params.update;
+    expect(configOptions).toContainEqual(expect.objectContaining({ id: "thinking", currentValue: "high" }));
     expect(configOptions[0].options).toEqual([{ value: "persistence-fixture/reasoning", name: "reasoning (persistence-fixture)" }]);
     await expectUsage();
     expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "/name 发布测试" }] }))
@@ -67,7 +67,7 @@ test("indexes Pi JSONL sessions and replays history to a second client after res
     expect(await client.request("session/load", { sessionId, cwd: resolve(cwd, "other"), mcpServers: [] }))
       .toMatchObject({ error: { code: -32602 } });
     expect(await client.request("session/load", { sessionId, cwd, mcpServers: [] }))
-      .toMatchObject({ result: { configOptions, modes: { ...modes, currentModeId: "high" } } });
+      .toMatchObject({ result: { configOptions } });
     expect((await client.nextNotification()).params).toEqual({ sessionId, update: {
       sessionUpdate: "user_message_chunk", content: { type: "text", text: "Remember this" },
     } });
