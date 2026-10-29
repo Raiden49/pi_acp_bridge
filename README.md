@@ -94,6 +94,7 @@ Keep `dist/index.js`, `dist/codemode-worker.js`, and `dist/quickjs.wasm` togethe
 ### Model settings and refresh
 
 - New chats follow Pi CLI startup selection: use the saved default if it is in `enabledModels`, otherwise the first matching scoped model (including its explicit Thinking suffix). With no matching scope, use Pi SDK's normal default/fallback selection.
+- Pi SDK、pi-ai 和 pi-mcp 已固定为 **1.4.0**；Bridge bundle 不随全局 CLI 自动升级。模型/Thinking 可在普通模型提示运行时修改：不改变已发出的请求，后续 Pi assistant 请求读取新配置，同一 prompt 的工具循环后也可生效。并发配置串行处理，失败时尽力同步实际状态；工具策略仍仅空闲时修改。详见 [配置事务与恢复初始化](docs/acp-live-configuration.md)。
 - Resumed chats preserve a successfully restored model and Thinking level. If the SDK reports restoration failure, the bridge reapplies the scoped startup selection instead of retaining an unrelated fallback. Startup diagnostics distinguish that historical fallback from the bridge's actual selection.
 - After editing Pi model configuration or saving `/scoped-models` in the terminal, send `/reload` in each open ACP chat. It rereads settings, local model catalogs and availability, then publishes the selector again, preserving the current model ID, Thinking level and history. It does not fetch remote catalogs; use `pi update --models` first when needed.
 - An unavailable or out-of-scope current model remains visibly marked for diagnosis without becoming an allowed selection. Other valid choices stay available. A successfully restored historical selection is not automatically replaced.

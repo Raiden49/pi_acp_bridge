@@ -24,6 +24,37 @@ test.each([true, false])("an unavailable or absent selection still offers workin
   } finally { await client.close(); }
 });
 
+test("history restores an extension provider before considering the scoped fallback", async () => {
+  await mkdir(".scratch", { recursive: true });
+  const root = await mkdtemp(resolve(".scratch/extension-model-recovery-"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", root);
+  vi.stubEnv("PI_OFFLINE", "1");
+  let session: Awaited<ReturnType<typeof createWorkspaceSession>> | undefined;
+  try {
+    const settings = JSON.stringify({ defaultProvider: "fixture", defaultModel: "fallback", enabledModels: ["fixture/fallback"],
+      skills: [], promptTemplates: [] });
+    await writeFile(resolve(root, "settings.json"), settings);
+    await writeFile(resolve(root, "models.json"), JSON.stringify({ providers: { fixture: {
+      api: "openai-completions", baseUrl: "https://example.invalid", apiKey: "fixture-only", models: [{ id: "fallback" }],
+    } } }));
+    await mkdir(resolve(root, "extensions"));
+    await writeFile(resolve(root, "extensions/provider.ts"), `export default function(pi) {
+      pi.registerProvider("extension-fixture", {
+        api: "openai-completions", baseUrl: "https://example.invalid", apiKey: "fixture-only",
+        models: [{ id: "historical", name: "Historical", reasoning: true, input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 65536, maxTokens: 4096 }],
+      });
+    }`);
+    const manager = SessionManager.create(root, resolve(root, "sessions"));
+    manager.appendMessage({ role: "user", content: "Previous conversation", timestamp: 1 });
+    manager.appendModelChange("extension-fixture", "historical");
+    session = await createWorkspaceSession(root, manager.getSessionFile());
+    expect([session.model?.provider, session.model?.id, session.bridgeDiagnostics?.startupNotices])
+      .toEqual(["extension-fixture", "historical", []]);
+    expect(await readFile(resolve(root, "settings.json"), "utf8")).toBe(settings);
+  } finally { session?.dispose(); vi.unstubAllEnvs(); await rm(root, { recursive: true, force: true }); }
+});
+
 test.each([true, false])("history restoration scopes SDK fallbacks but preserves valid selections: missing=%s", async (missing) => {
   await mkdir(".scratch", { recursive: true });
   const root = await mkdtemp(resolve(".scratch/model-recovery-"));

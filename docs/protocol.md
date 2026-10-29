@@ -13,7 +13,7 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 | `session/prompt` | 流式发送文本、思考与工具事件，排空通知队列后返回结果 |
 | `session/fork` | SDK 实验性接口；复制空闲持久化会话当前分支到新 ID/JSONL，不替换源会话、不回滚文件；明确拒绝指定消息位置 |
 | `_session/steering` | 可选 v1 扩展；由 `_meta.steering.supported` 广告，运行中接入 Pi 输入管线，空闲支持 promptRequired 或兼容性启动提示 |
-| `session/set_config_option` | 切换会话模型、Thinking 或 `approval` 工具策略 |
+| `session/set_config_option` | 串行切换会话配置；模型/Thinking 可在模型提示运行中修改，工具策略仅空闲时修改 |
 | `session/set_mode` | 广告的模式为 direct/ask/plan 工具策略；旧 Thinking 值保留兼容入口 |
 | `session/cancel` | 中止活动提示，保留会话及已产生的历史和文件变更 |
 | `session/close` | 清理资源，不删除历史 |
@@ -38,6 +38,9 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 - 标准下拉框来自 new/load 的 `configOptions`。模型 ID 为 `provider/id`，显示标签为 `model_name (provider)`，使用 Pi 提供的显示名称（Air in IDEs 拒绝与 ID 完全相同的名称），仅选取 Pi 认证可用快照中的模型；快照不保证远端调用成功。
 - Pi 合并设置中的 `enabledModels` 限制选择范围，复用 SDK 的匹配、顺序与去重规则。空范围展示全部可用模型；范围外但仍可用的当前模型追加保留；无匹配时警告且不放宽到全量。筛选本身不刷新认证或访问网络。
 - 没有消息的新会话按 CLI 范围启动：保存的默认模型在范围内时优先，否则使用第一个匹配模型，并应用该项显式 Thinking 后缀；无匹配时保留 SDK 默认/fallback，不放宽范围。成功恢复已有模型时不套用新默认；SDK 明确报告恢复失败时，重新按 CLI 范围规则选择，而不是保留其忽略 scope 的 fallback。模型或 Thinking 切换只影响当前会话，不修改全局默认；Pi `/model` 的 Ctrl+S 才保存启动默认。
+- 运行中的模型提示允许修改 model/Thinking（包括旧 Thinking 入口），调用 Pi 原生 setter，显式 `persist: false`。已经发出的模型请求不改变；Pi 在下一次 assistant 请求边界读取新配置，因此同一个 ACP prompt 的工具循环后可能使用新模型，不承诺等到下一条用户消息。压缩、重载等 Bridge 命令和取消期间不接受新的配置修改；普通提示进入结算不丢弃配置事务；工具策略仍仅在空闲时修改。
+- 同一会话的配置事务串行执行，写入与完整配置发布完成后才处理下一项；不因另一项配置修改正在进行而返回 busy。失败时保留错误，并尽力补发实际配置，即使值未变化也纠正客户端的乐观显示；不能向已关闭会话发布。reload 与结算快照也在相同队列内计算/发布，避免旧快照覆盖新配置。
+- 创建 services 时先由 SDK 加载扩展、注册 provider/native provider/virtual model 并刷新本地可用性，再由 `createAgentSessionFromServices()` 恢复历史。不自造历史模型扫描或 pending 注册队列；成功恢复但 scope 外的历史选择保持原语义。
 - reasoning 模型仅通过 `thought_level` 配置广告档位，直接使用 Pi 当前模型的能力，不硬编码供应商/模型名称。`modes` 只广告已加载执行适配的工具策略；`current_mode_update` 表示工具策略，不再广播 Thinking。模型切换后 `config_option_update` 携带完整配置与新档位列表。每轮提示结算时还比较完整配置快照，扩展改变模型/Thinking/目录可用性后按变化发布；无变化不重复发送，不按 delta 广播。失败/取消结算仍可同步配置元数据，但关闭的会话不再发布。
 - 当前模型缺失、不可用或在范围外时，保留明确标注的诊断项和其他可选模型。诊断展示不加入可选集合，设置模型时仍拒绝范围外值；scope 无匹配时不扩大集合。成功恢复的历史模型不会因此自动切换，也不伪造认证可用性。`__pi_no_model__` 仅是“未选择模型”占位，不是可调用模型；当前模型声明支持 reasoning 且提供档位时保留 Thinking 选项；模型诊断项不因此变成可调用模型。
 - `initialize._meta["pi-acp-bridge/models"]` 是独立的完整发现目录，内容仅有 ID 与名称，不过滤认证，不填充 IDE 下拉框。发现过程不联网、不解析秘密命令、不写认证；无效配置返回脱敏错误。
@@ -75,7 +78,7 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 
 ## 生命周期与持久化
 
-- 不同会话可并发；同会话的提示、压缩、重载和配置变更互斥，busy 返回 `-32600`。参数/未知会话错误返回 `-32602`；运行错误返回脱敏的 `-32603`。操作失败保留具体原因及有限的 Error cause，不序列化任意错误对象、堆栈或原请求；清除非白名单 error data，并脱敏 URL userinfo/query、认证 header 和常见 token 格式。脱敏不是任意文本的完整 DLP；分享 `/doctor` 前仍应检查路径和 provider/model 名称。
+- 不同会话可并发；同会话的提示、压缩和重载互斥，busy 返回 `-32600`。模型/Thinking 配置可与普通模型提示并行，但配置事务之间串行；后收到的提示等待已收到的配置事务完成，再进入 Pi。等待期间可取消提示，取消后不得迟到启动模型；不撤销或强行取消已经开始的配置写入。参数/未知会话错误返回 `-32602`；运行错误返回脱敏的 `-32603`。操作失败保留具体原因及有限的 Error cause，不序列化任意错误对象、堆栈或原请求；清除非白名单 error data，并脱敏 URL userinfo/query、认证 header 和常见 token 格式。脱敏不是任意文本的完整 DLP；分享 `/doctor` 前仍应检查路径和 provider/model 名称。
 - 取消后停止新增内容，但允许已向客户端展示的工具接收真实完成/失败事件；SDK 未报告终态时以 failed 关闭展示，明确“结果未知”，不谎报回滚。先排空 terminal updates 再结束提示；断开/关闭时不继续向已关闭客户端发送。
 - 关闭先阻止新操作，取消活动提示，等待提示和配置变更结算，再 shutdown 扩展并 dispose。服务器 shutdown 还等待创建、加载、分叉、删除和已移出活动表的清理操作。
 - 删除支持活动或已关闭的索引会话，与加载互斥，并等待已经开始的关闭。JSONL 删除失败返回错误并保留索引；文件已不存在时可清理残留索引，映射也已不存在时返回成功，兼容客户端重复完成同一条目。文件删除与索引替换不是跨文件原子事务，索引落盘失败可重试；不删除生成的图片资产。
@@ -86,7 +89,7 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 - 索引以 0600 临时文件及原子 rename 写入，损坏数据拒绝覆盖；`<索引>.lock.sqlite` 的事务锁负责跨进程互斥和崩溃释放。**运行时不得删除协调文件**，不承诺网络文件系统锁语义。
 - 从旧目录锁版本升级时，先停止所有旧桥接进程；禁止新旧锁机制同时写索引。
 - 索引锁只保护映射。Bridge 另用 `acp-session-locks/` 下的 SQLite 独占事务持有历史文件租约：加载前获取，关闭/断线及扩展清理结束后释放；删除也须获取租约。占用时立即返回 `-32600`、`data.reason: "session_active_writer"`。路径别名按 realpath 协调；崩溃由 OS 释放锁，不删除协调文件。
-- 租约默认位于 Pi agent 目录；自定义索引时位于索引同级。只有使用同一租约目录的 Bridge 进程互相协调，原版 Pi CLI 1.3.0 和 SDK 1.2.0 不遵守这把锁。终端接管前仍须停止 ACP 代理，返回 ACP 前退出终端并重新加载会话；`/reload` 不同步外部历史。回放使用完整分支，而非压缩后的模型上下文。
+- 租约默认位于 Pi agent 目录；自定义索引时位于索引同级。只有使用同一租约目录的 Bridge 进程互相协调，原版 Pi CLI/SDK 不使用 Bridge 的这把锁。终端接管前仍须停止 ACP 代理，返回 ACP 前退出终端并重新加载会话；`/reload` 不同步外部历史。回放使用完整分支，而非压缩后的模型上下文。
 
 ## 上下文用量
 
@@ -100,6 +103,10 @@ ACP v1，通过 stdio NDJSON 通信。Pi SDK 在进程内运行，每个会话�
 - 图片按内容哈希保存至 `~/workspace/storage/media/pi-acp-bridge/`，不自动删除，可能包含敏感信息。客户端展示差异见 [兼容性说明](air-integration.md)。
 
 ## 开发与构建
+
+Pi 的直接依赖 `pi-coding-agent`、`pi-ai`、`pi-mcp` 固定为 1.4.0，同族传递依赖由 lockfile 对齐；全局 Pi CLI 与独立 bundle 的版本不自动联动。
+
+可选 `PI_ACP_TRACE=1` 的 `configuration_change` 记录 received/queued/applying/applied/failed 等阶段、配置项及成功后的实际 model/Thinking，不记录未验证的请求值或任意错误正文。取消等待配置的提示记录 `prompt_cancelled_before_dispatch`。这些字段表示选定配置，不宣称已开始的流式请求使用了新模型；默认不开启，不改 IDE 启动配置。
 
 使用本地依赖，执行 `pnpm run typecheck` 和直接受改动影响的 `pnpm exec vitest run test/<file>.test.ts`。测试使用隔离资源和假模型，不操作个人认证；协议验证不能替代真实 IDE 验收。
 

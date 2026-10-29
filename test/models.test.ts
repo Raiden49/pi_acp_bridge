@@ -46,12 +46,12 @@ test("native model selector switches the model used by the next prompt without c
     expect(a.configOptions).toContainEqual(expect.objectContaining({ id: "thinking", category: "thought_level" }));
     // Thinking uses the replaceable thought_level options, not a stale legacy modes list.
     expect(a.modes).toBeUndefined();
-    const expectConfiguration = async (level: string) => {
+    const expectConfiguration = async (level: string, usage = true) => {
       const update = (await client.nextNotification()).params.update;
       expect(update.sessionUpdate).toBe("config_option_update");
       const thinking = update.configOptions.find((option: { id: string }) => option.id === "thinking");
       if (thinking) expect(thinking.currentValue).toBe(level);
-      await expectUsage();
+      if (usage) await expectUsage();
       return update.configOptions;
     };
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "thinking", value: "high" }))
@@ -63,6 +63,7 @@ test("native model selector switches the model used by the next prompt without c
     await expectConfiguration("high");
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "mode", value: "invalid" }))
       .toMatchObject({ error: { code: -32602 } });
+    await expectConfiguration("high", false);
     await client.request("session/prompt", { sessionId: a.sessionId, prompt: [{ type: "text", text: "Think" }] });
     await client.nextNotification();
     await expectUsage();
@@ -77,6 +78,8 @@ test("native model selector switches the model used by the next prompt without c
       .toMatchObject({ error: { code: -32602 } });
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "thinking", value: "invalid" }))
       .toMatchObject({ error: { code: -32602 } });
+    await expectConfiguration("low", false);
+    await expectConfiguration("low", false);
     expect(a.configOptions[0].options).not.toContainEqual(expect.objectContaining({ value: "unconfigured-bridge-test/hidden" }));
     const b = (await client.request("session/new", { cwd, mcpServers: [] })).result;
     await expectUsage();
@@ -86,6 +89,7 @@ test("native model selector switches the model used by the next prompt without c
       .toMatchObject({ result: { configOptions: [expect.objectContaining({ currentValue: ids[1] })] } });
     await expectConfiguration("off");
     expect(await client.request("session/set_mode", { sessionId: a.sessionId, modeId: "high" })).toMatchObject({ error: { code: -32602 } });
+    await expectConfiguration("off", false);
     for (const [sessionId, expected] of [[a.sessionId, ids[1]], [b.sessionId, ids[0]]]) {
       expect(await client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "identify model" }] }))
         .toMatchObject({ result: { stopReason: "end_turn" } });

@@ -1,5 +1,7 @@
 # 模型恢复、Thinking 与 reload 修复
 
+> 本文记录上一批基于 SDK 1.2.0 的修复与验证。后续 Pi 1.4 升级、运行中配置和扩展 provider 恢复顺序见 [配置事务与恢复初始化](acp-live-configuration.md)。
+
 ## 对照依据
 
 本次复用已固定 commit 的成熟实现，不将研究时的上游接口直接替换成本项目的 ACP v2：

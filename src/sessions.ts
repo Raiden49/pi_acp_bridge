@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionServices, createAgentSessionFromServices, getAgentDir, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { RequestError, type McpServer } from "@agentclientprotocol/sdk";
 import { bridgeBuiltinExtensions } from "./client-mcp.js";
 import { applyInitialModelScope } from "./models.js";
@@ -54,13 +54,14 @@ export async function createWorkspaceSession(cwd: string, sessionFile?: string, 
   }
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir);
-  const resourceLoader = new DefaultResourceLoader({
-    cwd, agentDir, settingsManager, extensionFactories: [...bridgeBuiltinExtensions(mcpServers), ...(fileSystem?.extensions() ?? []), ...(approval?.extensions() ?? [])],
-  });
-  await resourceLoader.reload();
-  const { session, modelFallbackMessage } = await createAgentSession({ cwd, agentDir, settingsManager, sessionManager, resourceLoader });
+  // Match the CLI: register extension providers before resolving historical selection.
+  const services = await createAgentSessionServices({ cwd, agentDir, settingsManager, resourceLoaderOptions: {
+    extensionFactories: [...bridgeBuiltinExtensions(mcpServers), ...(fileSystem?.extensions() ?? []), ...(approval?.extensions() ?? [])],
+  } });
+  const { session, modelFallbackMessage } = await createAgentSessionFromServices({ services, sessionManager });
   const bridge: BridgeSession = session;
-  bridge.bridgeDiagnostics = { agentDir, startupNotices: modelFallbackMessage ? [modelFallbackMessage] : [] };
+  const diagnostics = services.diagnostics.map(({ type, message }) => `${type}: ${message}`);
+  bridge.bridgeDiagnostics = { agentDir, startupNotices: [...diagnostics, ...(modelFallbackMessage ? [modelFallbackMessage] : [])] };
   try {
     // Preserve a successfully restored selection, not an SDK fallback that ignored scope.
     if (!sessionManager.buildSessionContext().messages.length || modelFallbackMessage) {
@@ -68,6 +69,7 @@ export async function createWorkspaceSession(cwd: string, sessionFile?: string, 
     }
     if (modelFallbackMessage && session.model) {
       bridge.bridgeDiagnostics.startupNotices = [
+        ...diagnostics,
         `SDK 启动恢复记录（历史事件）：${modelFallbackMessage}`,
         `Bridge 启动选择：${session.model.provider}/${session.model.id}；模型范围未扩大。`,
       ];

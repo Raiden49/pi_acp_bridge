@@ -31,12 +31,12 @@ test("scoped model choices follow Pi settings, retain the current model and refr
     return session;
   } });
   const choices = (options: any[]) => options.find((option) => option.id === "model").options.map((option: any) => option.value);
-  const nextConfiguration = async () => {
+  const nextConfiguration = async (usage = true) => {
     const text: string[] = [];
     for (;;) {
       const { update } = (await client.nextNotification()).params;
       if (update.sessionUpdate === "config_option_update") {
-        expect((await client.nextNotification()).params.update.sessionUpdate).toBe("usage_update");
+        if (usage) expect((await client.nextNotification()).params.update.sessionUpdate).toBe("usage_update");
         return { options: update.configOptions, text: text.join("") };
       }
       if (update.sessionUpdate === "agent_message_chunk") text.push(update.content.text);
@@ -51,9 +51,11 @@ test("scoped model choices follow Pi settings, retain the current model and refr
     expect((await client.nextNotification()).params.update.sessionUpdate).toBe("usage_update");
     await client.nextNotification();
     expect(choices(a.configOptions)).toEqual(["scope-test/one", "scope-test/two"]);
+    expect(choices((await nextConfiguration(false)).options)).toEqual(["scope-test/one", "scope-test/two"]);
     expect(a.configOptions.find((option: any) => option.id === "thinking").currentValue).toBe("medium");
     expect(await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "model", value: "scope-test/three" }))
       .toMatchObject({ error: { code: -32602 } });
+    expect(choices((await nextConfiguration(false)).options)).toEqual(["scope-test/one", "scope-test/two"]);
     await client.request("session/set_config_option", { sessionId: a.sessionId, configId: "model", value: "scope-test/two" });
     expect(choices((await nextConfiguration()).options)).toEqual(["scope-test/two"]);
     const reload = async (patterns: string[]) => {

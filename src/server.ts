@@ -38,6 +38,7 @@ export interface ServerOptions {
 
 interface ActivePrompt {
   cancelled: boolean;
+  command: boolean;
   acceptingInputs: boolean;
   inputs: Set<Promise<void>>;
   inputError?: unknown;
@@ -51,6 +52,7 @@ interface ManagedSession {
   session: BridgeSession;
   cwd: string;
   active?: ActivePrompt;
+  waitingPrompt?: AbortController;
   changingConfiguration?: Promise<void>;
   notices?: string[];
   questions?: Questions;
@@ -126,6 +128,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     return pending;
   }
   async function disposeSession(entry: ManagedSession) {
+    entry.waitingPrompt?.abort();
     if (entry.active) {
       entry.active.cancelled = true;
       entry.session.bridgeApproval?.cancelTurn();
@@ -189,20 +192,55 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     }
     return configOptions;
   }
-  async function changeConfiguration(sessionId: string, change: (session: BridgeSession) => void | Promise<void>) {
-    const entry = getSession(sessionId);
-    if (entry.active || entry.changingConfiguration) throw new RequestError(-32600, "Session is busy");
-    const changing = Promise.resolve().then(() => change(entry.session)).then(async () => {
-      if (entry.session.bridgeApproval) await indexSession(sessionId, entry);
-      const configOptions = await publishConfiguration(sessionId, entry.session);
-      if (sessions.get(sessionId) === entry && !deleting.has(sessionId)) await publishUsage(sessionId, entry.session);
-      return configOptions;
+  function serializeConfiguration<T>(entry: ManagedSession, operation: () => Promise<T>): Promise<T> {
+    const pending = (entry.changingConfiguration ?? Promise.resolve()).then(operation);
+    const tail = pending.then(() => {}, () => {});
+    entry.changingConfiguration = tail;
+    void tail.then(() => { if (entry.changingConfiguration === tail) entry.changingConfiguration = undefined; });
+    return pending;
+  }
+  function syncConfiguration(sessionId: string, entry: ManagedSession, { force = false, settled = false } = {}) {
+    return serializeConfiguration(entry, async () => {
+      if (closed || sessions.get(sessionId) !== entry || deleting.has(sessionId)) return false;
+      // Compute inside the same queue as setters, never publish a pre-mutation snapshot later.
+      const state = await sessionConfiguration(entry.session);
+      if (!force && JSON.stringify(state) === entry.configurationSignature) return false;
+      await publishConfiguration(sessionId, entry.session, state, settled);
+      return true;
     });
-    entry.changingConfiguration = changing.then(() => {}, () => {});
-    try { return await changing; }
-    catch (error) {
-      throw bridgeError("Unable to update Pi session configuration", error);
-    } finally { entry.changingConfiguration = undefined; }
+  }
+  async function changeConfiguration(sessionId: string, configId: string, change: (session: BridgeSession) => void | Promise<void>, live = false) {
+    const option = ["model", "thinking", "mode", "approval"].includes(configId) ? configId : "unsupported";
+    const report = (stage: string, fields: Record<string, string | number | boolean> = {}) =>
+      trace({ event: "configuration_change", sessionId, configId: option, stage, ...fields });
+    report("received");
+    const entry = getSession(sessionId);
+    if (entry.changingConfiguration) report("queued");
+    return serializeConfiguration(entry, async () => {
+      try {
+        if (closed || sessions.get(sessionId) !== entry || deleting.has(sessionId) || forking.has(sessionId)) {
+          throw new RequestError(-32600, "Session is closing or unavailable");
+        }
+        if (entry.active && (!live || entry.active.command || entry.active.cancelled)) {
+          throw new RequestError(-32600, "Session is busy");
+        }
+        report("applying");
+        await change(entry.session);
+        if (entry.session.bridgeApproval) await indexSession(sessionId, entry);
+        const configOptions = await publishConfiguration(sessionId, entry.session);
+        if (sessions.get(sessionId) === entry && !deleting.has(sessionId)) await publishUsage(sessionId, entry.session);
+        report("applied", { model: entry.session.model ? `${entry.session.model.provider}/${entry.session.model.id}` : "none",
+          thinking: entry.session.thinkingLevel ?? "off" });
+        return configOptions;
+      } catch (error) {
+        report("failed", { code: error instanceof RequestError ? error.code : -32603 });
+        // Correct optimistic clients even when the selection itself never changed.
+        if (!closed && sessions.get(sessionId) === entry && !deleting.has(sessionId)) {
+          await publishConfiguration(sessionId, entry.session, undefined, true).catch(() => report("reconciliation_failed"));
+        }
+        throw bridgeError("Unable to update Pi session configuration", error);
+      }
+    });
   }
   async function leaseRecord(record: SessionRecord & { id: string }, lease: SessionLease) {
     for (;;) {
@@ -321,7 +359,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         lockedIds.add(record.id); forking.add(record.id);
         const live = [...sessions.entries()].find(([, candidate]) => candidate.session.sessionFile === record!.sessionFile);
         if (live) {
-          if (live[1].active || live[1].changingConfiguration) throw new RequestError(-32600, "Source session is busy");
+          if (live[1].active || live[1].waitingPrompt || live[1].changingConfiguration) throw new RequestError(-32600, "Source session is busy");
           lockedIds.add(live[0]); forking.add(live[0]);
         } else {
           await closingFiles.get(record.sessionFile);
@@ -418,14 +456,14 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       } finally { loading.delete(sessionId); if (canonicalId) loading.delete(canonicalId); }
     }),
     async setSessionMode(params) {
-      await changeConfiguration(params.sessionId, (session) => {
+      await changeConfiguration(params.sessionId, "mode", (session) => {
         if (session.bridgeApproval && ["direct", "ask", "plan"].includes(params.modeId)) session.bridgeApproval.setMode(params.modeId);
         else setThinking(session, params.modeId); // Compatibility for previously advertised Thinking modes.
-      });
+      }, !["direct", "ask", "plan"].includes(params.modeId));
       return {};
     },
     async setSessionConfigOption(params) {
-      const configOptions = await changeConfiguration(params.sessionId, async (session) => {
+      const configOptions = await changeConfiguration(params.sessionId, params.configId, async (session) => {
         if (params.configId === "approval" || (params.configId === "mode" && ["direct", "ask", "plan"].includes(String(params.value)))) {
           if (!session.bridgeApproval) throw RequestError.invalidParams("Tool policy adapter is not loaded");
           session.bridgeApproval.setMode(params.value);
@@ -443,7 +481,8 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         const model = models.find((candidate) => `${candidate.provider}/${candidate.id}` === params.value);
         if (!model) throw RequestError.invalidParams(undefined, "Unknown, unavailable or out-of-scope model");
         await session.setModel(model, { persist: false });
-      });
+      }, params.configId === "model" || params.configId === "thinking" ||
+        (params.configId === "mode" && !["direct", "ask", "plan"].includes(String(params.value))));
       return { configOptions };
     },
     async authenticate() { throw RequestError.methodNotFound("authenticate"); },
@@ -453,7 +492,6 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       const entry = getSession(request.sessionId);
       const active = entry.active;
       if (!active) {
-        if (entry.changingConfiguration) throw new RequestError(-32600, "Session configuration is changing");
         if (request.idleBehavior === "promptRequired") return { outcome: "promptRequired", reason: "noRunningTurn" };
         parseBridgeCommand(request.prompt);
         void Promise.resolve(agent.prompt({ sessionId: request.sessionId, prompt: request.prompt })).catch(async (error) => {
@@ -490,7 +528,23 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
       const started = Date.now();
       trace({ event: "prompt_received", sessionId: params.sessionId, blocks: params.prompt.length });
       const entry = getSession(params.sessionId);
-      if (entry.active || entry.changingConfiguration) throw new RequestError(-32600, "Session is busy");
+      if (entry.active || entry.waitingPrompt) throw new RequestError(-32600, "Session is busy");
+      if (entry.changingConfiguration) {
+        const waiting = new AbortController();
+        entry.waitingPrompt = waiting;
+        const cancelled = new Promise<void>(resolve => waiting.signal.addEventListener("abort", () => resolve(), { once: true }));
+        try {
+          while (entry.changingConfiguration) {
+            await Promise.race([entry.changingConfiguration, cancelled]);
+            if (waiting.signal.aborted) {
+              trace({ event: "prompt_cancelled_before_dispatch", sessionId: params.sessionId });
+              return { stopReason: "cancelled" };
+            }
+            if (getSession(params.sessionId) !== entry) throw new RequestError(-32600, "Session was replaced");
+          }
+        } finally { if (entry.waitingPrompt === waiting) entry.waitingPrompt = undefined; }
+      }
+      if (entry.active) throw new RequestError(-32600, "Session is busy");
       const command = parseBridgeCommand(params.prompt);
       let decoded: ReturnType<typeof decodePrompt>;
       // Local commands ignore attached context, including images that need not be read or decoded.
@@ -504,7 +558,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         images: images.length, imageBase64Length: images.reduce((total, image) => total + image.data.length, 0) });
       let finish!: () => void;
       const settled = new Promise<void>((resolve) => { finish = resolve; });
-      const active: ActivePrompt = { cancelled: false, acceptingInputs: true, inputs: new Set(), unsubscribe: () => {}, settled };
+      const active: ActivePrompt = { cancelled: false, command: Boolean(command), acceptingInputs: true, inputs: new Set(), unsubscribe: () => {}, settled };
       entry.active = active;
       let stopReason: StopReason = "end_turn";
       let failed = false;
@@ -615,10 +669,8 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         } else if (command?.name === "reload") {
           enqueueText("正在重新加载模型配置、扩展、技能与模板……\n");
           let configurationPublished = false;
-          const syncConfiguration = async (force = false) => {
-            const state = await sessionConfiguration(entry.session);
-            if (force || JSON.stringify(state) !== entry.configurationSignature) {
-              await publishConfiguration(params.sessionId, entry.session, state);
+          const syncReloadConfiguration = async (force = false) => {
+            if (await syncConfiguration(params.sessionId, entry, { force })) {
               await publishUsage(params.sessionId, entry.session);
               configurationPublished = true;
             }
@@ -628,7 +680,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
           await entry.session.reload({ beforeSessionStart: async () => {
             // Providers have now been re-registered. Refresh once, before MCP startup.
             await refreshSessionModels(entry.session);
-            await enqueue(syncConfiguration);
+            await enqueue(syncReloadConfiguration);
             enqueueText("模型配置与资源已刷新；正在启动扩展与连接 MCP……\n");
             trace({ event: "reload_stage", sessionId: params.sessionId, stage: "session_start" });
           } });
@@ -638,7 +690,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
             await client.sessionUpdate({ sessionId: params.sessionId, update: {
               sessionUpdate: "available_commands_update", availableCommands: availableCommands(entry.session),
             } });
-            await syncConfiguration(!configurationPublished);
+            await syncReloadConfiguration(!configurationPublished);
           });
         } else if (command?.name === "compact") {
           await entry.session.compact(command.args);
@@ -685,13 +737,11 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
         // Extensions can change configuration outside the bridge's setter paths.
         // Compare only at settlement, including failed/cancelled turns, not on deltas.
         if (!closed && sessions.get(params.sessionId) === entry && !deleting.has(params.sessionId)) {
-          updates = updates.then(async () => {
-            const state = await sessionConfiguration(entry.session);
-            if (JSON.stringify(state) !== entry.configurationSignature) {
-              await publishConfiguration(params.sessionId, entry.session, state, true);
-            }
+          // Do not put this wait in the content queue: model_select hooks may flush UI updates.
+          try {
+            await syncConfiguration(params.sessionId, entry, { settled: true });
             await refreshUsage();
-          }).catch(() => { deliveryFailed = true; });
+          } catch { deliveryFailed = true; }
         }
         await updates;
         try {
@@ -707,6 +757,7 @@ export function startServer({ input, output, modelsPath, artifactDir = join(home
     },
     async cancel({ sessionId }) {
       const entry = getSession(sessionId);
+      entry.waitingPrompt?.abort();
       if (entry.active) {
         entry.active.cancelled = true;
         entry.session.bridgeApproval?.cancelTurn();
