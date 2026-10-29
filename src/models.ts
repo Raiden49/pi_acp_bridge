@@ -37,7 +37,7 @@ export async function refreshSessionModels(session: BridgeSession) {
   }
 }
 
-export async function selectableModels(session: BridgeSession) {
+export async function selectableModels(session: Pick<BridgeSession, "modelRuntime" | "settingsManager">) {
   const available = session.modelRuntime?.getAvailableSnapshot() ?? [];
   const patterns = session.settingsManager?.getEnabledModels();
   if (!patterns?.length) return { models: [...available] };
@@ -52,7 +52,11 @@ export async function selectableModels(session: BridgeSession) {
   return { models, warning };
 }
 
-export async function sessionConfiguration(session: BridgeSession): Promise<{
+type ConfigurationSession = Pick<BridgeSession,
+  "bridgeApproval" | "modelRuntime" | "settingsManager" | "model" | "thinkingLevel" | "getAvailableThinkingLevels"
+>;
+
+export async function sessionConfiguration(session: ConfigurationSession): Promise<{
   configOptions: SessionConfigOption[]; modes?: SessionModeState; warning?: string;
 }> {
   const approval = session.bridgeApproval?.option();
@@ -78,9 +82,9 @@ export async function sessionConfiguration(session: BridgeSession): Promise<{
     // Keep labels distinct from wire IDs: Air rejects model names equal to their values.
     options: choices,
   }];
-  if (session.model?.reasoning && session.thinkingLevel) {
+  if (session.model?.reasoning) {
     options.push({ id: "thinking", name: "Thinking", category: "thought_level", type: "select",
-      currentValue: session.thinkingLevel,
+      currentValue: session.thinkingLevel ?? "off",
       options: session.getAvailableThinkingLevels().map(value => ({ value, name: value })),
     });
   }

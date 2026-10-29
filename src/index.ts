@@ -10,7 +10,6 @@ registerBunOAuthFlows();
 const connection = startServer({
   input: Readable.toWeb(process.stdin),
   output: Writable.toWeb(process.stdout),
-  // TODO: Remove temporary tracing and its tests/docs after the image-response stall is fixed and verified in Air.
   // Opt-in metadata only; never log prompt text, image data, or credentials.
   trace: process.env.PI_ACP_TRACE === "1" ? (event) => {
     process.stderr.write(`[pi-acp-bridge] ${JSON.stringify({ time: new Date().toISOString(), ...event })}\n`);

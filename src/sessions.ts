@@ -4,6 +4,7 @@ import { createAgentSessionServices, createAgentSessionFromServices, getAgentDir
 import { RequestError, type McpServer } from "@agentclientprotocol/sdk";
 import { bridgeBuiltinExtensions } from "./client-mcp.js";
 import { applyInitialModelScope } from "./models.js";
+import { bridgeCommands } from "./commands.js";
 import type { ClientFileSystem } from "./client-filesystem.js";
 import type { ApprovalGate } from "./approvals.js";
 
@@ -26,11 +27,7 @@ export function availableCommands(session: BridgeSession) {
   const add = (name: string, description = "") => {
     if (!commands.has(name)) commands.set(name, { name, description });
   };
-  add("session", "显示当前会话、历史路径与用量统计");
-  add("doctor", "只读诊断运行版本、配置来源、模型与 MCP 入口（不调用模型）");
-  add("reload", "重新加载模型配置、扩展、技能与模板（保留当前模型与聊天历史）");
-  add("name", "查看或修改 Pi 会话标题");
-  add("compact", "压缩当前上下文；可附加摘要要求，会调用模型");
+  for (const { name, description } of bridgeCommands) add(name, description);
   for (const command of session.extensionRunner?.getRegisteredCommands() ?? []) add(command.invocationName, command.description);
   for (const template of session.promptTemplates ?? []) add(template.name, template.description);
   if (session.settingsManager?.getEnableSkillCommands()) {

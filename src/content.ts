@@ -22,9 +22,9 @@ export function decodePrompt(blocks: ContentBlock[]) {
     else if (block.type === "image" || (block.type === "resource_link" && block.mimeType?.startsWith("image/"))) {
       try {
         const mimeType = block.mimeType!;
-        const data = block.type === "image" && block.data ? block.data
+        const data = block.type === "image" && block.data ? block.data.replace(/[\r\n]/g, "")
           : readFileSync(fileURLToPath(block.type === "image" ? block.uri! : block.uri)).toString("base64");
-        if (!mimeType.startsWith("image/") || !data || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) {
+        if (!mimeType.startsWith("image/") || !data || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
           throw new Error("Invalid image");
         }
         images.push({ type: "image", data, mimeType });

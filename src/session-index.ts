@@ -5,7 +5,9 @@ import { setTimeout } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export interface SessionRecord { cwd: string; sessionFile: string; pending?: boolean; approvalMode?: "direct" | "ask" | "plan" }
+import { isApprovalMode, type ApprovalMode } from "./approvals.js";
+
+export interface SessionRecord { cwd: string; sessionFile: string; pending?: boolean; approvalMode?: ApprovalMode }
 
 export class SessionIndex {
   constructor(private path = join(getAgentDir(), "acp-sessions.json")) {}
@@ -22,7 +24,7 @@ export class SessionIndex {
       !entry || typeof entry.cwd !== "string" || !isAbsolute(entry.cwd) ||
       typeof entry.sessionFile !== "string" || !isAbsolute(entry.sessionFile) ||
       (entry.pending !== undefined && typeof entry.pending !== "boolean") ||
-      (entry.approvalMode !== undefined && !["direct", "ask", "plan"].includes(entry.approvalMode)))) throw new Error("Invalid session index");
+      (entry.approvalMode !== undefined && !isApprovalMode(entry.approvalMode)))) throw new Error("Invalid session index");
     return value as Record<string, SessionRecord>;
   }
 

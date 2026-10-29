@@ -3,6 +3,10 @@ import type { InlineExtension, SessionManager, ToolCallEvent } from "@earendil-w
 import { errorDetail } from "./errors.js";
 
 export type ApprovalMode = "direct" | "ask" | "plan";
+
+export function isApprovalMode(value: unknown): value is ApprovalMode {
+  return value === "direct" || value === "ask" || value === "plan";
+}
 const entryType = "pi-acp-bridge/approval-v1";
 const readOnly = new Set(["read", "grep", "find", "ls", "codemode", "tool_search"]);
 
@@ -23,7 +27,10 @@ export class ApprovalGate {
     const entry = manager?.getBranch().findLast(entry => entry.type === "custom" && entry.customType === entryType);
     if (entry?.type === "custom") {
       const mode = (entry.data as { mode?: unknown } | undefined)?.mode;
-      if (mode === "direct" || mode === "ask" || mode === "plan") { this.mode = mode; return; }
+      if (isApprovalMode(mode)) {
+        this.mode = mode;
+        return;
+      }
     }
     // Pi deliberately keeps setup-only custom entries in memory. Restore the
     // indexed policy and append it so the first conversation persists it.
@@ -31,7 +38,7 @@ export class ApprovalGate {
   }
 
   setMode(value: unknown) {
-    if (!this.installed || (value !== "direct" && value !== "ask" && value !== "plan")) throw RequestError.invalidParams("Unsupported approval mode");
+    if (!this.installed || !isApprovalMode(value)) throw RequestError.invalidParams("Unsupported approval mode");
     this.manager?.appendCustomEntry(entryType, { mode: value });
     this.mode = value;
   }
@@ -42,9 +49,20 @@ export class ApprovalGate {
       options: [{ value: "direct", name: "Direct execution" }, { value: "ask", name: "Ask before changes" }, { value: "plan", name: "Plan (read-only tools)" }] };
   }
 
-  beginTurn(beforePermission: (toolCallId: string) => Promise<void>) { this.turn = new AbortController(); this.beforePermission = beforePermission; }
-  cancelTurn() { this.turn?.abort(); }
-  finishTurn() { this.cancelTurn(); this.turn = undefined; this.beforePermission = undefined; }
+  beginTurn(beforePermission: (toolCallId: string) => Promise<void>) {
+    this.turn = new AbortController();
+    this.beforePermission = beforePermission;
+  }
+
+  cancelTurn() {
+    this.turn?.abort();
+  }
+
+  finishTurn() {
+    this.cancelTurn();
+    this.turn = undefined;
+    this.beforePermission = undefined;
+  }
 
   extensions(): InlineExtension[] {
     return [{ name: "acp-tool-policy", hidden: true, factory: pi => {
@@ -56,17 +74,22 @@ export class ApprovalGate {
           ? "Plan mode: inspect and explain only. Do not modify files, execute shell commands, or invoke unknown tools."
           : "Ask-before-changes mode: tools that can change state require the user's approval."}`,
       });
-      pi.on("tool_call", (event, ctx) => this.check(event, ctx.signal));
+      pi.on("tool_call", (event, ctx) => {
+        // Hints come from trusted tool registrations, never model-supplied input.
+        // Resolve on each call so reloads and late MCP registration remain visible.
+        const hint = pi.getAllTools().find(tool => tool.name === event.toolName)?.annotations?.readOnlyHint;
+        return this.check(event, hint ?? readOnly.has(event.toolName), ctx.signal);
+      });
       this.installed = true;
     } }];
   }
 
-  private async check(event: ToolCallEvent, sdkSignal?: AbortSignal) {
+  private async check(event: ToolCallEvent, readOnly: boolean, sdkSignal?: AbortSignal) {
     const signals = [this.turn?.signal, sdkSignal].filter((signal): signal is AbortSignal => !!signal);
     const signal = signals.length ? AbortSignal.any(signals) : undefined;
     const blocked = (reason: string) => ({ block: true as const, reason });
     if (signal?.aborted) return blocked("Tool execution cancelled");
-    if (this.mode === "direct" || readOnly.has(event.toolName)) return;
+    if (this.mode === "direct" || readOnly) return;
     if (this.mode === "plan") return blocked(`Plan mode blocks ${event.toolName}; switch the session's Tool policy to approve changes.`);
     let onAbort: (() => void) | undefined;
     try {

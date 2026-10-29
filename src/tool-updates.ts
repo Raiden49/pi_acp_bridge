@@ -22,7 +22,12 @@ function resolveToolPath(path: string, cwd: string) {
   path = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
   if (path === "~") return homedir();
   if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
-  return resolve(cwd, path.startsWith("file://") ? fileURLToPath(path) : path);
+  try {
+    return resolve(cwd, path.startsWith("file://") ? fileURLToPath(path) : path);
+  } catch {
+    // Invalid tool input must not interrupt synchronous session event delivery.
+    return undefined;
+  }
 }
 
 function location(path: string, line: number) {

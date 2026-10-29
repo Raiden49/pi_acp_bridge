@@ -1,5 +1,7 @@
 import { RequestError } from "@agentclientprotocol/sdk";
 
+export const SESSION_ACTIVE_WRITER = "session_active_writer";
+
 const sensitiveName = /^(?:(?:(?:x[-_]?)?api[-_]?|private[-_]?)?key|(?:access[-_]?|refresh[-_]?|id[-_]?)?token|authorization|proxy-authorization|password|passwd|secret|client[-_]?secret|credential|signature|sig|code|x-amz-(?:credential|signature|security-token))$/i;
 
 // Parse URLs rather than attempting to recognize credentials inside their encoding.
@@ -33,7 +35,7 @@ export function bridgeError(operation: string, error: unknown): RequestError {
   if (error instanceof RequestError) {
     const data = error.data as { reason?: unknown } | undefined;
     return new RequestError(error.code, errorDetail(error),
-      data?.reason === "session_active_writer" ? { reason: data.reason } : undefined);
+      data?.reason === SESSION_ACTIVE_WRITER ? { reason: data.reason } : undefined);
   }
   return new RequestError(-32603, `${operation}: ${errorDetail(error)}`);
 }
