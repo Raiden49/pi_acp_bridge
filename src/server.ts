@@ -9,6 +9,7 @@ import { discoverModels } from "./models.js";
 import { createSessionLifecycle } from "./session-lifecycle.js";
 import { createTurnRunner } from "./turn-runner.js";
 import { createSteeringHandler } from "./steering.js";
+import { guardInitialization } from "./protocol-guard.js";
 import packageInfo from "../package.json" with { type: "json" };
 
 export interface ServerOptions {
@@ -32,7 +33,7 @@ export function startServer({
     lifecycle = createSessionLifecycle({ ...options, client, artifactDir, trace });
     const { host, configuration, index, methods } = lifecycle;
     const prompt = createTurnRunner({ ...host, configuration, artifactDir, index });
-    return {
+    return guardInitialization({
       ...methods,
       async initialize(params): Promise<InitializeResponse> {
         lifecycle.configureClient(params.clientCapabilities);
@@ -53,7 +54,7 @@ export function startServer({
       async authenticate() { throw RequestError.methodNotFound("authenticate"); },
       extMethod: createSteeringHandler(host, prompt),
       prompt,
-    };
+    });
   }, ndJsonStream(output, input));
   const shutdown = () => lifecycle.shutdown();
   return { closed: connection.closed.then(shutdown), shutdown };

@@ -1,6 +1,16 @@
 import { RequestError } from "@agentclientprotocol/sdk";
 
 export const SESSION_ACTIVE_WRITER = "session_active_writer";
+// Implementation-defined state errors must stay outside ACP's reserved ranges.
+export const SESSION_BUSY = -32900;
+
+export function sessionBusy(message = "Session is busy") {
+  return new RequestError(SESSION_BUSY, message);
+}
+
+export function sessionNotFound(sessionId: string) {
+  return new RequestError(-32002, "Session not found or not active", { sessionId });
+}
 
 const sensitiveName = /^(?:(?:(?:x[-_]?)?api[-_]?|private[-_]?)?key|(?:access[-_]?|refresh[-_]?|id[-_]?)?token|authorization|proxy-authorization|password|passwd|secret|client[-_]?secret|credential|signature|sig|code|x-amz-(?:credential|signature|security-token))$/i;
 
@@ -33,9 +43,10 @@ export function errorDetail(error: unknown, maxLength = 2000): string {
 // arbitrary error data (which may contain the original request or credentials).
 export function bridgeError(operation: string, error: unknown): RequestError {
   if (error instanceof RequestError) {
-    const data = error.data as { reason?: unknown } | undefined;
-    return new RequestError(error.code, errorDetail(error),
-      data?.reason === SESSION_ACTIVE_WRITER ? { reason: data.reason } : undefined);
+    const data = error.data as { reason?: unknown; sessionId?: unknown } | undefined;
+    const safeData = data?.reason === SESSION_ACTIVE_WRITER ? { reason: data.reason }
+      : error.code === -32002 && typeof data?.sessionId === "string" ? { sessionId: data.sessionId } : undefined;
+    return new RequestError(error.code, errorDetail(error), safeData);
   }
   return new RequestError(-32603, `${operation}: ${errorDetail(error)}`);
 }

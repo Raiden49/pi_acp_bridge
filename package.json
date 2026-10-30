@@ -1,6 +1,6 @@
 {
   "name": "pi-acp-bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "engines": {
@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsup",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:acp": "tsup --config tests/tsup.config.ts && node --test .scratch/acp-tests/*.test.js"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.8.0",

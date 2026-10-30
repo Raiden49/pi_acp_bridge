@@ -1,7 +1,7 @@
 import { RequestError, type SessionUpdate, type SetSessionModeRequest, type SetSessionConfigOptionRequest } from "@agentclientprotocol/sdk";
 import { sessionConfiguration } from "./models.js";
 import { isLiveConfiguration, setLegacyMode, setSessionOption } from "./session-options.js";
-import { bridgeError } from "./errors.js";
+import { sessionBusy, bridgeError } from "./errors.js";
 import type { BridgeSession } from "./sessions.js";
 import type { ManagedSession, SessionHost } from "./managed-session.js";
 
@@ -70,10 +70,10 @@ export function createConfigCoordinator({
     return serializeConfiguration(entry, async () => {
       try {
         if (isClosed() || sessions.get(sessionId) !== entry || deleting.has(sessionId) || forking.has(sessionId)) {
-          throw new RequestError(-32600, "Session is closing or unavailable");
+          throw sessionBusy("Session is closing or unavailable");
         }
         if (entry.active && (!live || entry.active.command || entry.active.cancelled)) {
-          throw new RequestError(-32600, "Session is busy");
+          throw sessionBusy("Session is busy");
         }
         report("applying");
         await change(entry.session);
@@ -97,12 +97,12 @@ export function createConfigCoordinator({
   return {
     usageUpdate, publishUsage, warnConfiguration, syncConfiguration,
     async setSessionMode({ sessionId, modeId }: SetSessionModeRequest) {
-      await changeConfiguration(sessionId, "mode", session => setLegacyMode(session, modeId), isLiveConfiguration("mode", modeId));
+      await changeConfiguration(sessionId, "mode", session => setLegacyMode(session, modeId), isLiveConfiguration("mode"));
       return {};
     },
     async setSessionConfigOption({ sessionId, configId, value }: SetSessionConfigOptionRequest) {
       const configOptions = await changeConfiguration(sessionId, configId,
-        session => setSessionOption(session, configId, value), isLiveConfiguration(configId, value));
+        session => setSessionOption(session, configId, value), isLiveConfiguration(configId));
       return { configOptions };
     },
   };

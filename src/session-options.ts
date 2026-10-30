@@ -3,10 +3,8 @@ import { isApprovalMode } from "./approvals.js";
 import { selectableModels, setThinking } from "./models.js";
 import type { BridgeSession } from "./sessions.js";
 
-// Keep legacy Air selectors at the protocol boundary, not in model selection.
-export function isLiveConfiguration(configId: string, value: unknown) {
-  return configId === "model" || configId === "thinking" ||
-    (configId === "mode" && !isApprovalMode(value));
+export function isLiveConfiguration(configId: string) {
+  return ["model", "thinking", "approval", "mode"].includes(configId);
 }
 
 export function setLegacyMode(session: BridgeSession, value: string) {
@@ -14,19 +12,17 @@ export function setLegacyMode(session: BridgeSession, value: string) {
     session.bridgeApproval.setMode(value);
     return;
   }
-  if (!session.model || !session.getAvailableThinkingLevels().some(level => level === value)) {
-    throw RequestError.invalidParams(undefined, "Unsupported session mode");
-  }
-  setThinking(session, value);
+  throw RequestError.invalidParams(undefined, "Unsupported session mode");
 }
 
 export async function setSessionOption(session: BridgeSession, configId: string, value: unknown) {
-  if (configId === "approval" || (configId === "mode" && isApprovalMode(value))) {
+  if (configId === "approval") {
     if (!session.bridgeApproval) throw RequestError.invalidParams("Tool policy adapter is not loaded");
     session.bridgeApproval.setMode(value);
     return;
   }
-  if (configId === "thinking" || configId === "mode") {
+  if (configId === "thinking") {
+    if (!session.model?.reasoning) throw RequestError.invalidParams("Thinking option is not available");
     setThinking(session, value);
     return;
   }

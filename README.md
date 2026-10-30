@@ -74,4 +74,6 @@ Restart the agent afterward. `/reload` refreshes Pi configuration, not bridge co
 - Use trusted workspaces and extensions only. Tools execute locally without an OS sandbox.
 - Do not open the same history for writing in Pi CLI and the bridge simultaneously. `session/delete` permanently deletes that history.
 
+协议修复、会话发现的性能边界和验证范围见 [ACP v1 审计记录](docs/acp-v1-audit.md)。
+
 Independent integration; not an official JetBrains product.

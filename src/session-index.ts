@@ -7,7 +7,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import { isApprovalMode, type ApprovalMode } from "./approvals.js";
 
-export interface SessionRecord { cwd: string; sessionFile: string; pending?: boolean; approvalMode?: ApprovalMode }
+export interface SessionRecord { cwd: string; sessionFile: string; pending?: boolean; approvalMode?: ApprovalMode; nativeId?: string; deleted?: boolean }
 
 export class SessionIndex {
   constructor(private path = join(getAgentDir(), "acp-sessions.json")) {}
@@ -24,6 +24,8 @@ export class SessionIndex {
       !entry || typeof entry.cwd !== "string" || !isAbsolute(entry.cwd) ||
       typeof entry.sessionFile !== "string" || !isAbsolute(entry.sessionFile) ||
       (entry.pending !== undefined && typeof entry.pending !== "boolean") ||
+      (entry.deleted !== undefined && typeof entry.deleted !== "boolean") ||
+      (entry.nativeId !== undefined && typeof entry.nativeId !== "string") ||
       (entry.approvalMode !== undefined && !isApprovalMode(entry.approvalMode)))) throw new Error("Invalid session index");
     return value as Record<string, SessionRecord>;
   }
@@ -39,15 +41,21 @@ export class SessionIndex {
     await this.update((entries) => { entries[id] = record; });
   }
 
-  async delete(id: string) {
+  async delete(id: string, nativeId?: string) {
     return this.update(async (entries) => {
       const record = Object.hasOwn(entries, id) ? entries[id] : undefined;
       if (!record) return false;
       // Keep the index on failure; a missing JSONL is already deleted.
       await rm(record.sessionFile, { force: true });
+      const native = nativeId ?? record.nativeId ?? id;
+      // Keep a lightweight tombstone: copied JSONLs must not resurrect a deleted
+      // session in later lists, including after a bridge restart.
       for (const [alias, entry] of Object.entries(entries)) {
-        if (resolve(entry.sessionFile) === resolve(record.sessionFile)) delete entries[alias];
+        if (resolve(entry.sessionFile) === resolve(record.sessionFile) || entry.nativeId === native) {
+          entries[alias] = { ...entry, nativeId: native, deleted: true };
+        }
       }
+      entries[native] = { ...record, nativeId: native, deleted: true };
       return true;
     });
   }

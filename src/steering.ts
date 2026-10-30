@@ -1,7 +1,7 @@
 import { RequestError, type Agent, type ContentBlock } from "@agentclientprotocol/sdk";
 import { decodePrompt } from "./content.js";
 import { parseBridgeCommand } from "./commands.js";
-import { bridgeError, errorDetail } from "./errors.js";
+import { sessionBusy, bridgeError, errorDetail } from "./errors.js";
 import type { SessionHost } from "./managed-session.js";
 
 // Claude ACP's v1 extension contract, not an invented ACP v2 method.
@@ -48,7 +48,7 @@ export function createSteeringHandler(
       });
       return { outcome: "startedNewTurn" };
     }
-    if (active.cancelled || !active.acceptingInputs || entry.session.isIdle === true) throw new RequestError(-32600, "Session is cancelling, running a command, or settling");
+    if (active.cancelled || !active.acceptingInputs || entry.session.isIdle === true) throw sessionBusy("Session is cancelling, running a command, or settling");
     if (parseBridgeCommand(request.prompt)) throw RequestError.invalidParams("Bridge commands cannot be injected into a running turn");
     const { text, images } = request.decode();
     // Pi RPC uses this public prompt/preflight hook, including the race where
@@ -59,7 +59,7 @@ export function createSteeringHandler(
         images, streamingBehavior: "steer", source: "rpc", expandPromptTemplates: false,
         preflightResult: () => {
           if (active.cancelled || !active.acceptingInputs) {
-            reject(new RequestError(-32600, "Turn is no longer accepting input"));
+            reject(sessionBusy("Turn is no longer accepting input"));
             return;
           }
           accepted = true;

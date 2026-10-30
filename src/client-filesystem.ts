@@ -36,9 +36,9 @@ export class ClientFileSystem {
     try {
       return (await this.client.readTextFile({ sessionId: this.requestSessionId(), path })).content;
     } catch (error) {
-      // ACP has no standard ENOENT code; match Gemini's missing-file normalization.
+      // ACP standardizes -32002; retain text matching for older clients.
       const message = error instanceof Error ? error.message : String(error);
-      if (/Resource not found|ENOENT|does not exist|No such file/i.test(message)) {
+      if ((error as { code?: number } | null)?.code === -32002 || /Resource not found|ENOENT|does not exist|No such file/i.test(message)) {
         throw Object.assign(new Error(message, { cause: error }), { code: "ENOENT" });
       }
       throw error;

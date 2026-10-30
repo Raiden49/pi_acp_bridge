@@ -1,6 +1,6 @@
 import { RequestError, type PromptRequest, type PromptResponse, type StopReason, type SessionUpdate } from "@agentclientprotocol/sdk";
 import { decodePrompt, imageLink, toolImageLinks } from "./content.js";
-import { bridgeError } from "./errors.js";
+import { sessionBusy, bridgeError } from "./errors.js";
 import { createToolUpdates } from "./tool-updates.js";
 import { ImageLinkStream } from "./image-links.js";
 import { customMessageUpdates } from "./history.js";
@@ -26,7 +26,7 @@ export function createTurnRunner({
     const started = Date.now();
     trace({ event: "prompt_received", sessionId: params.sessionId, blocks: params.prompt.length });
     const entry = getSession(params.sessionId);
-    if (entry.active || entry.waitingPrompt) throw new RequestError(-32600, "Session is busy");
+    if (entry.active || entry.waitingPrompt) throw sessionBusy("Session is busy");
     if (entry.changingConfiguration) {
       const waiting = new AbortController();
       entry.waitingPrompt = waiting;
@@ -38,13 +38,13 @@ export function createTurnRunner({
             trace({ event: "prompt_cancelled_before_dispatch", sessionId: params.sessionId });
             return { stopReason: "cancelled" };
           }
-          if (getSession(params.sessionId) !== entry) throw new RequestError(-32600, "Session was replaced");
+          if (getSession(params.sessionId) !== entry) throw sessionBusy("Session was replaced");
         }
       } finally {
         if (entry.waitingPrompt === waiting) entry.waitingPrompt = undefined;
       }
     }
-    if (entry.active) throw new RequestError(-32600, "Session is busy");
+    if (entry.active) throw sessionBusy("Session is busy");
     const command = parseBridgeCommand(params.prompt);
     let decoded: ReturnType<typeof decodePrompt>;
     // Local commands ignore attached context, including images that need not be read or decoded.

@@ -3,7 +3,7 @@ import { mkdir, realpath, open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { RequestError } from "@agentclientprotocol/sdk";
-import { SESSION_ACTIVE_WRITER } from "./errors.js";
+import { SESSION_ACTIVE_WRITER, SESSION_BUSY } from "./errors.js";
 
 // Cooperating Bridge processes only: stock Pi does not acquire this lease.
 export class SessionLease {
@@ -26,7 +26,7 @@ export class SessionLease {
     } catch (error) {
       lock.close();
       if ((error as { errcode?: number }).errcode === 5) {
-        throw new RequestError(-32600,
+        throw new RequestError(SESSION_BUSY,
           "This Pi session is in use by another Pi Bridge process. Close it there before loading or deleting it here.",
           { reason: SESSION_ACTIVE_WRITER });
       }

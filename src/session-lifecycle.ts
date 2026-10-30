@@ -6,7 +6,7 @@ import { imageLink, toolImageLinks } from "./content.js";
 import { RequestError, type AgentSideConnection, type ClientCapabilities } from "@agentclientprotocol/sdk";
 import type { Agent, McpServer, SessionUpdate, FileSystemCapabilities } from "@agentclientprotocol/sdk";
 import { sessionConfiguration } from "./models.js";
-import { bridgeError, errorDetail, SESSION_ACTIVE_WRITER } from "./errors.js";
+import { sessionBusy, bridgeError, errorDetail, sessionNotFound, SESSION_ACTIVE_WRITER } from "./errors.js";
 import { ApprovalGate, type ApprovalMode } from "./approvals.js";
 import { ClientFileSystem } from "./client-filesystem.js";
 import { availableCommands, createWorkspaceSession, type BridgeSession } from "./sessions.js";
@@ -49,8 +49,8 @@ export function createSessionLifecycle({
   let fileSystemCapabilities: FileSystemCapabilities = {};
   function getSession(id: string) {
     const entry = sessions.get(id);
-    if (!entry || deleting.has(id)) throw RequestError.invalidParams("Unknown or closed session");
-    if (forking.has(id)) throw new RequestError(-32600, "Session is being forked");
+    if (!entry || deleting.has(id) || closing.has(id)) throw sessionNotFound(id);
+    if (forking.has(id)) throw sessionBusy("Session is being forked");
     return entry;
   }
   function openSession<T>(work: () => Promise<T>): Promise<T> {
@@ -123,12 +123,14 @@ export function createSessionLifecycle({
   function closeManaged(sessionId: string) {
     const entry = sessions.get(sessionId);
     if (!entry) return closing.get(sessionId) ?? Promise.resolve();
-    sessions.delete(sessionId);
+    if (closing.has(sessionId)) return closing.get(sessionId)!;
+    // Keep the entry reachable until its cancelled prompt drains tool updates.
     const pending = dispose(entry);
     closing.set(sessionId, pending);
     const file = entry.session.sessionFile;
     if (file) closingFiles.set(file, pending);
     const remove = () => {
+      if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
       closing.delete(sessionId);
       if (file) closingFiles.delete(file);
     };
@@ -140,6 +142,7 @@ export function createSessionLifecycle({
       await lease.acquire(record.sessionFile);
       const latest = await index.get(record.id);
       if (!latest) return record;
+      if (latest.deleted) throw sessionNotFound(record.id);
       if (latest.sessionFile === record.sessionFile) return { id: record.id, ...latest };
       // A pending session may have moved while this operation was resolving it.
       record = { id: record.id, ...latest };
@@ -152,7 +155,7 @@ export function createSessionLifecycle({
       if (error.code === "ENOENT") return true;
       throw error;
     });
-    await index.set(sessionId, { cwd: entry.cwd, sessionFile, ...(pending ? { pending: true } : {}),
+    await index.set(sessionId, { cwd: entry.cwd, sessionFile, nativeId: entry.session.sessionManager?.getSessionId(), ...(pending ? { pending: true } : {}),
       ...(entry.session.bridgeApproval ? { approvalMode: entry.session.bridgeApproval.mode } : {}),
     });
   }
@@ -216,7 +219,7 @@ export function createSessionLifecycle({
       }
     }),
     async listSessions({ cwd, cursor }) {
-      if (cwd && !isAbsolute(cwd)) throw RequestError.invalidParams("cwd must be absolute");
+      if (cwd != null && !isAbsolute(cwd)) throw RequestError.invalidParams("cwd must be absolute");
       try {
         return await catalog.list(cwd, cursor);
       } catch (error) {
@@ -229,7 +232,7 @@ export function createSessionLifecycle({
       if (air?.fork !== undefined) throw RequestError.invalidParams("Only branch-tip forks are supported; selected-message fork points are not supported");
       clientMcpEntries(params.mcpServers ?? []);
       if (loading.has(params.sessionId) || deleting.has(params.sessionId) || forking.has(params.sessionId) || closing.has(params.sessionId)) {
-        throw new RequestError(-32600, "Session is busy");
+        throw sessionBusy("Session is busy");
       }
       const lockedIds = new Set([params.sessionId]);
       forking.add(params.sessionId);
@@ -240,21 +243,30 @@ export function createSessionLifecycle({
       let entry: ManagedSession | undefined;
       let retained = false;
       try {
-        let record = await catalog.resolve(params.sessionId);
-        if (!record || record.cwd !== params.cwd) throw RequestError.invalidParams("Unknown session or workspace mismatch");
+        let record = await catalog.resolve(params.sessionId, params.cwd);
+        if (!record) throw sessionNotFound(params.sessionId);
+        if (record.cwd !== params.cwd) throw RequestError.invalidParams("Session workspace mismatch");
         if (record.id !== params.sessionId && (forking.has(record.id) || loading.has(record.id) || deleting.has(record.id) || closing.has(record.id))) {
-          throw new RequestError(-32600, "Session is busy");
+          throw sessionBusy("Session is busy");
         }
         lockedIds.add(record.id);
         forking.add(record.id);
         const live = [...sessions.entries()].find(([, candidate]) => candidate.session.sessionFile === record!.sessionFile);
         if (live) {
-          if (live[1].active || live[1].waitingPrompt || live[1].changingConfiguration) throw new RequestError(-32600, "Source session is busy");
+          if (live[1].active || live[1].waitingPrompt || live[1].changingConfiguration) throw sessionBusy("Source session is busy");
           lockedIds.add(live[0]);
           forking.add(live[0]);
         } else {
           await closingFiles.get(record.sessionFile);
           record = await leaseRecord(record, sourceLease);
+        }
+        const exists = await stat(record.sessionFile).then(() => true, (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        });
+        if (!exists) {
+          if (record.pending) throw RequestError.invalidParams("Cannot fork a session without conversation history");
+          throw sessionNotFound(params.sessionId);
         }
         // Open a separate manager: the runtime fork API replaces the source.
         const snapshot = SessionManager.open(record.sessionFile);
@@ -310,27 +322,30 @@ export function createSessionLifecycle({
       trace({ event: "session_open", method: "session/load", sessionId });
       if (!isAbsolute(cwd) || params.additionalDirectories?.length) throw RequestError.invalidParams("Unsupported workspace configuration");
       clientMcpEntries(params.mcpServers);
-      if (sessions.has(sessionId) || loading.has(sessionId) || forking.has(sessionId) || deleting.has(sessionId) || closing.has(sessionId)) throw new RequestError(-32600, "Session already loaded");
+      if (sessions.has(sessionId) || loading.has(sessionId) || forking.has(sessionId) || deleting.has(sessionId) || closing.has(sessionId)) throw sessionBusy("Session already loaded");
       loading.add(sessionId);
       let session: BridgeSession | undefined;
       let entry: ManagedSession | undefined;
       let canonicalId: string | undefined;
       const lease = new SessionLease(leaseDirectory);
       try {
-        const resolved = await catalog.resolve(sessionId);
-        if (!resolved || resolved.cwd !== cwd) throw RequestError.invalidParams("Unknown session or workspace mismatch");
+        const resolved = await catalog.resolve(sessionId, cwd);
+        if (!resolved) throw sessionNotFound(sessionId);
+        if (resolved.cwd !== cwd) throw RequestError.invalidParams("Session workspace mismatch");
         if ((resolved.id !== sessionId && loading.has(resolved.id)) || forking.has(resolved.id) || deleting.has(resolved.id) || closing.has(resolved.id) || closingFiles.has(resolved.sessionFile) ||
           [...sessions.values()].some((entry) => entry.session.sessionFile === resolved.sessionFile)) {
-          throw new RequestError(-32600, "Session already loaded");
+          throw sessionBusy("Session already loaded");
         }
         canonicalId = resolved.id;
         loading.add(canonicalId);
         const record = await leaseRecord(resolved, lease);
         if (record.cwd !== cwd) throw RequestError.invalidParams("Session workspace mismatch");
-        const pending = record.pending && await stat(record.sessionFile).then(() => false, (error: NodeJS.ErrnoException) => {
+        const missing = await stat(record.sessionFile).then(() => false, (error: NodeJS.ErrnoException) => {
           if (error.code === "ENOENT") return true;
           throw error;
         });
+        if (missing && !record.pending) throw sessionNotFound(sessionId);
+        const pending = record.pending && missing;
         const fileSystem = new ClientFileSystem(cwd, getAgentDir(), client, fileSystemCapabilities);
         session = await createWithPolicy(cwd, pending ? undefined : record.sessionFile, params.mcpServers, pending ? canonicalId : undefined, fileSystem);
         fileSystem.bindSession(sessionId);
@@ -372,12 +387,12 @@ export function createSessionLifecycle({
       }
     },
     async closeSession({ sessionId }) {
-      getSession(sessionId);
+      if (forking.has(sessionId) || loading.has(sessionId)) throw sessionBusy("Session is busy");
       await closeManaged(sessionId);
       return {};
     },
     deleteSession: ({ sessionId }) => openSession(async () => {
-      if (loading.has(sessionId) || forking.has(sessionId) || deleting.has(sessionId)) throw new RequestError(-32600, "Session is busy");
+      if (loading.has(sessionId) || forking.has(sessionId) || deleting.has(sessionId)) throw sessionBusy("Session is busy");
       deleting.add(sessionId);
       const lease = new SessionLease(leaseDirectory);
       let canonicalId: string | undefined;
@@ -385,7 +400,7 @@ export function createSessionLifecycle({
         const record = await catalog.resolve(sessionId);
         const resolvedId = record?.id ?? sessionId;
         if (resolvedId !== sessionId && (loading.has(resolvedId) || forking.has(resolvedId) || deleting.has(resolvedId))) {
-          throw new RequestError(-32600, "Session is busy");
+          throw sessionBusy("Session is busy");
         }
         canonicalId = resolvedId;
         deleting.add(canonicalId);
@@ -400,7 +415,8 @@ export function createSessionLifecycle({
         if (record) await leaseRecord(record, lease);
         // Native histories need a mapping so deletion uses the same locked index path.
         if (record && !await index.get(canonicalId)) await index.set(canonicalId, { cwd: record.cwd, sessionFile: record.sessionFile });
-        if (record) await index.delete(canonicalId);
+        if (record) await index.delete(canonicalId, record.nativeId);
+        catalog.invalidate();
         return {};
       } catch (error) {
         throw bridgeError("Unable to permanently delete Pi session", error);

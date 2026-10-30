@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { SessionUpdate, ToolCallContent, ToolKind } from "@agentclientprotocol/sdk";
+import { displayContent } from "./content.js";
 
 const kinds: Record<string, ToolKind> = {
   read: "read", edit: "edit", write: "edit", bash: "execute", grep: "search", find: "search", ls: "read",
@@ -62,7 +63,7 @@ export function createToolUpdates(cwd: string, editorChanges?: Map<string, FileC
       const result = event.type === "tool_execution_end" ? event.result : event.partialResult;
       const content: ToolCallContent[] = [];
       for (const block of result.content ?? []) {
-        if (block.type === "text" || block.type === "image") content.push({ type: "content", content: block });
+        if (block.type === "text" || block.type === "image") content.push({ type: "content", content: displayContent(block) });
       }
       const editor = event.type === "tool_execution_end" ? editorChanges?.get(event.toolCallId) : undefined;
       const file = editor ?? files.get(event.toolCallId);

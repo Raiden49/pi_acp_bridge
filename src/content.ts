@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { RequestError, type ContentBlock, type SessionUpdate } from "@agentclientprotocol/sdk";
@@ -8,10 +7,24 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 type Image = NonNullable<NonNullable<Parameters<AgentSession["prompt"]>[1]>["images"]>[number];
 
+// Pi's text signatures are provider-private fields, not ACP ContentBlock fields.
+export function displayContent(content: { type: "text"; text: string } | Image): ContentBlock {
+  return content.type === "text" ? { type: "text", text: content.text }
+    : { type: "image", data: content.data, mimeType: content.mimeType };
+}
+
 function contextAttributes(fields: Record<string, string | null | undefined>) {
   const escape = (value: string) => value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[char]!);
   return Object.entries(fields).filter(([, value]) => value != null)
     .map(([key, value]) => `${key}="${escape(value!)}"`).join(" ");
+}
+
+function decodeImage(value: string, mimeType: string): Image {
+  const data = value.replace(/[\r\n]/g, "");
+  if (!mimeType.startsWith("image/") || !data || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+    throw RequestError.invalidParams("Image requires base64 data and an image MIME type");
+  }
+  return { type: "image", data, mimeType };
 }
 
 export function decodePrompt(blocks: ContentBlock[]) {
@@ -19,24 +32,19 @@ export function decodePrompt(blocks: ContentBlock[]) {
   const images: Image[] = [];
   for (const block of blocks) {
     if (block.type === "text") text.push(block.text);
-    else if (block.type === "image" || (block.type === "resource_link" && block.mimeType?.startsWith("image/"))) {
-      try {
-        const mimeType = block.mimeType!;
-        const data = block.type === "image" && block.data ? block.data.replace(/[\r\n]/g, "")
-          : readFileSync(fileURLToPath(block.type === "image" ? block.uri! : block.uri)).toString("base64");
-        if (!mimeType.startsWith("image/") || !data || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
-          throw new Error("Invalid image");
-        }
-        images.push({ type: "image", data, mimeType });
-      } catch { throw RequestError.invalidParams("Image requires base64 data or a readable local file URI"); }
+    else if (block.type === "image") {
+      images.push(decodeImage(block.data, block.mimeType));
     } else if (block.type === "resource_link") {
       text.push(`<resource_link ${contextAttributes({ ref: block.uri, name: block.name, title: block.title, mimeType: block.mimeType, description: block.description })} />`);
     } else if (block.type === "resource" && "text" in block.resource) {
       // Like Claude ACP, preserve the supplied reference beside embedded text.
       // Links are references only: never fetch arbitrary remote resources here.
       text.push(`<context ${contextAttributes({ ref: block.resource.uri, mimeType: block.resource.mimeType })}>\n${block.resource.text}\n</context>`);
-    }
-    else throw RequestError.invalidParams("Unsupported prompt content");
+    } else if (block.type === "resource" && "blob" in block.resource) {
+      const { blob, mimeType, uri } = block.resource;
+      if (mimeType?.startsWith("image/")) images.push(decodeImage(blob, mimeType));
+      else text.push(`<context ${contextAttributes({ ref: uri, mimeType, encoding: "base64" })}>\n${blob}\n</context>`);
+    } else throw RequestError.invalidParams("Unsupported prompt content");
   }
   return { text: text.join("\n"), images };
 }
