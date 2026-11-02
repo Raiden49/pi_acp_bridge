@@ -27,7 +27,7 @@ const registry = process.argv[2]
 if (!['1', '1.0.0'].includes(registry.version) || !Array.isArray(registry.agents)) {
   throw new Error('Expected a version 1 ACP registry with an agents array.');
 }
-const output = join(root, '.scratch/local-registry');
+const output = join(root, 'dist/local-registry');
 const archive = join(output, 'launcher.zip');
 const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
 mkdirSync(output, { recursive: true });

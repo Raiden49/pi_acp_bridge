@@ -1,0 +1,3 @@
+# Dependency lifecycle scripts are intentionally never executed (see update.sh).
+# Without this, pnpm >= 11 fails the install with ERR_PNPM_IGNORED_BUILDS.
+strictDepBuilds: false

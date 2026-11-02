@@ -33,13 +33,13 @@ Quit the IDE and back up `~/Library/Application Support/JetBrains/<product-and-v
 
 ```xml
 <entry key="air.acp.registry.path"
-       value="/absolute/path/to/pi_acp_bridge/.scratch/local-registry/registry.json"
+       value="/absolute/path/to/pi_acp_bridge/dist/local-registry/registry.json"
        source="USER" />
 ```
 
 Create the `Registry` component inside `<application>` if absent. Restart the IDE, install **Pi Bridge** from Air's agent catalog, and start a new chat. Requires a plugin version supporting `air.acp.registry.path`.
 
-Keep `.scratch/local-registry/`; rerun the script to refresh its catalog snapshot.
+Keep `dist/local-registry/`; rerun the script to refresh its catalog snapshot after updating the bridge.
 
 ### Air Desktop / Zed
 
