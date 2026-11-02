@@ -33,8 +33,17 @@ check_runtime() {
 }
 
 check_runtime
+# This script updates itself, but a running shell keeps reading the old file after
+# git replaces it, so a pulled change would only take effect on the next run. Detect
+# that and re-exec the new version instead of finishing with stale logic.
+script_signature="$(cksum < "$0")"
 printf '正在快进更新当前分支……\n'
 git -c pull.rebase=false pull --ff-only
+if [[ "$(cksum < "$0")" != "$script_signature" ]]; then
+  [[ -z "${PI_ACP_BRIDGE_REEXEC:-}" ]] || fail 'update.sh 拉取后仍在变化，请检查后重跑。'
+  printf 'update.sh 已更新，正在用新版本重新执行……\n'
+  PI_ACP_BRIDGE_REEXEC=1 exec "$0" "$@"
+fi
 
 # Recheck requirements in case the incoming version changed them.
 check_runtime
