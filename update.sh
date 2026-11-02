@@ -44,4 +44,21 @@ pnpm install --frozen-lockfile --ignore-scripts
 printf '正在检查类型并构建……\n'
 pnpm run typecheck
 pnpm run build
+
+# The local IDE registry is machine-local (absolute paths, launcher sha256) and never
+# committed, so rebuild it here. Reuse the existing snapshot as base to stay offline.
+if [[ "$(uname -s)" == Darwin ]]; then
+  registry=dist/local-registry/registry.json
+  if [[ -f "$registry" ]]; then
+    printf '正在刷新本地 IDE registry……\n'
+    node scripts/create-local-registry.mjs "$registry" \
+      || printf '警告：本地 registry 刷新失败，IDE 目录仍指向上一份快照。\n' >&2
+  else
+    printf '正在生成本地 IDE registry（需联网获取公共目录）……\n'
+    node scripts/create-local-registry.mjs \
+      || printf '警告：本地 registry 生成失败（可能无网络），JetBrains 本地目录不可用；可稍后手动重跑。\n' >&2
+  fi
+else
+  printf '非 macOS，跳过本地 IDE registry。\n'
+fi
 printf '\n更新完成：%s/dist/index.js\n请让 IDE 重新启动代理进程；/reload 不会加载新代码。\n' "$PWD"

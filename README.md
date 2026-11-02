@@ -29,6 +29,14 @@ On macOS, generate a local registry with the Node runtime you want to use:
 node scripts/create-local-registry.mjs
 ```
 
+The registry is machine-local (absolute paths, launcher checksum) and never committed. `./update.sh` later regenerates it on every run, reusing the existing snapshot and the runtime already recorded in the launcher, so no network is needed.
+
+To use a different runtime, set it explicitly:
+
+```sh
+PI_BRIDGE_NODE="$(mise which node)" node scripts/create-local-registry.mjs
+```
+
 Quit the IDE and back up `~/Library/Application Support/JetBrains/<product-and-version>/options/ide.general.xml`. Add this entry inside `<component name="Registry">`, preserving existing settings:
 
 ```xml

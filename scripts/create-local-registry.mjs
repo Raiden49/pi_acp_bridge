@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync, accessSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync, accessSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -30,9 +30,29 @@ if (!['1', '1.0.0'].includes(registry.version) || !Array.isArray(registry.agents
 const output = join(root, 'dist/local-registry');
 const archive = join(output, 'launcher.zip');
 const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+// Keep the runtime stable across regenerations: an explicit override wins, then the
+// runtime recorded in the previous launcher, then the runtime executing this script.
+function launchNode() {
+  const previous = join(output, 'launch');
+  const recorded = [process.env.PI_BRIDGE_NODE, (() => {
+    try {
+      const match = readFileSync(previous, 'utf8').match(/^exec '((?:[^']|'\\'')*)'/m);
+      return match?.[1].replaceAll("'\\''", "'");
+    } catch {}
+  })()].find((candidate) => {
+    try {
+      if (candidate) accessSync(candidate);
+      return Boolean(candidate);
+    } catch { return false; }
+  });
+  return recorded ?? process.execPath;
+}
+const node = launchNode();
 mkdirSync(output, { recursive: true });
-writeFileSync(join(output, 'launch'), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(bundle)} "$@"\n`);
+writeFileSync(join(output, 'launch'), `#!/bin/sh\nexec ${quote(node)} ${quote(bundle)} "$@"\n`);
 chmodSync(join(output, 'launch'), 0o755);
+// Fixed mtime keeps the archive hash stable when only the catalog snapshot changes.
+utimesSync(join(output, 'launch'), new Date('2000-01-01T00:00:00Z'), new Date('2000-01-01T00:00:00Z'));
 rmSync(archive, { force: true });
 execFileSync('/usr/bin/zip', ['-q', '-X', archive, 'launch'], { cwd: output });
 const agent = {
@@ -59,5 +79,5 @@ registry.agents = registry.agents.filter((entry) => entry.id !== agent.id);
 registry.agents.push(agent);
 const path = join(output, 'registry.json');
 writeFileSync(path, JSON.stringify(registry, null, 2) + '\n');
-console.log(`Registry: ${path}\nNode: ${process.execPath}\nAgents: ${registry.agents.length}`);
+console.log(`Registry: ${path}\nNode: ${node}\nAgents: ${registry.agents.length}`);
 console.log('No IDE settings changed. This is a local catalog snapshot, not a live public registry.');
