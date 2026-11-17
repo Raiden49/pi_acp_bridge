@@ -1,16 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800">
-  <title>Pi ACP Bridge</title>
-  <defs>
-    <linearGradient id="pi-gradient" gradientUnits="userSpaceOnUse"
-      x1="165.29" y1="165.29" x2="634.72" y2="634.72">
-      <stop offset="0" stop-color="#FF318C"/>
-      <stop offset="0.5" stop-color="#A943F5"/>
-      <stop offset="1" stop-color="#427BFF"/>
-    </linearGradient>
-  </defs>
-  <!-- Preserve the original Pi silhouette and transparent cutout. -->
-  <path fill="url(#pi-gradient)" fill-rule="evenodd" d="
+  <!-- P shape: outer boundary clockwise, inner hole counter-clockwise -->
+  <path fill="currentColor" fill-rule="evenodd" d="
     M165.29 165.29
     H517.36
     V400
@@ -26,5 +17,6 @@
     V282.65
     Z
   "/>
-  <path fill="url(#pi-gradient)" d="M517.36 400 H634.72 V634.72 H517.36 Z"/>
+  <!-- i dot -->
+  <path fill="currentColor" d="M517.36 400 H634.72 V634.72 H517.36 Z"/>
 </svg>
