@@ -5,8 +5,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { SessionUpdate, ToolCallContent, ToolKind } from "@agentclientprotocol/sdk";
 import { displayContent } from "./content.js";
-// TODO: Re-enable SubagentProtocolTracker for Pi once Pi has native subagent support.
-// import { SubagentProtocolTracker } from "./subagents.js";
 
 const kinds: Record<string, ToolKind> = {
   read: "read", edit: "edit", write: "edit", bash: "execute", grep: "search", find: "search", ls: "read",
@@ -45,9 +43,7 @@ export interface FileChange {
 
 export function createToolUpdates(cwd: string, editorChanges?: Map<string, FileChange>) {
   const files = new Map<string, { path: string; oldText: string | null | undefined }>();
-  // TODO: Re-enable once Pi has native subagent support.
-  // const subagents = new SubagentProtocolTracker();
-  const fn = (event: AgentSessionEvent): SessionUpdate[] => {
+  return (event: AgentSessionEvent): SessionUpdate[] => {
     if (event.type === "tool_execution_start") {
       const args = event.args as Record<string, unknown>;
       const rawPath = args.path;
@@ -57,12 +53,10 @@ export function createToolUpdates(cwd: string, editorChanges?: Map<string, FileC
         files.set(event.toolCallId, { path, oldText: snapshot(path) });
       }
       const line = typeof args.offset === "number" ? Math.max(1, Math.trunc(args.offset)) : 1;
-      const callUpdate: SessionUpdate = { sessionUpdate: "tool_call", toolCallId: event.toolCallId, title: event.toolName,
+      return [{ sessionUpdate: "tool_call", toolCallId: event.toolCallId, title: event.toolName,
         kind: kinds[event.toolName] ?? "other", status: "in_progress", rawInput: event.args,
         locations: path ? [location(path, line)] : [],
-      };
-      // TODO: return subagents.transformSessionUpdate(callUpdate as unknown as Record<string, unknown>) as unknown as SessionUpdate[];
-      return [callUpdate];
+      }];
     }
     if (event.type === "tool_execution_end" || event.type === "tool_execution_update") {
       const result = event.type === "tool_execution_end" ? event.result : event.partialResult;
@@ -86,16 +80,9 @@ export function createToolUpdates(cwd: string, editorChanges?: Map<string, FileC
           locations = [location(file.path, Math.min(index + 1, after.length))];
         }
       }
-      const toolUpdate: SessionUpdate = { sessionUpdate: "tool_call_update", toolCallId: event.toolCallId, content, rawOutput: result, locations,
-        status: event.type === "tool_execution_end" ? event.isError ? "failed" : "completed" : "in_progress" };
-      // TODO: return subagents.transformSessionUpdate(toolUpdate as unknown as Record<string, unknown>) as unknown as SessionUpdate[];
-      return [toolUpdate];
+      return [{ sessionUpdate: "tool_call_update", toolCallId: event.toolCallId, content, rawOutput: result, locations,
+        status: event.type === "tool_execution_end" ? event.isError ? "failed" : "completed" : "in_progress" }];
     }
     return [];
   };
-  return Object.assign(fn, {
-    // TODO: Re-enable once Pi has native subagent support.
-    // settleSubagents: (cancelled = false) => subagents.settleTurn(cancelled) as unknown as SessionUpdate[],
-    settleSubagents: (_cancelled = false): SessionUpdate[] => [],
-  });
 }

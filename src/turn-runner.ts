@@ -217,10 +217,6 @@ export function createTurnRunner({
           ? "操作已取消；工具未报告最终结果，已发生的文件变更不会自动撤销。"
           : "本轮已结束，但工具未报告最终结果。" } }],
       });
-      // TODO: Re-enable once Pi has native subagent support.
-      // for (const subUpdate of toolUpdates.settleSubagents(active.cancelled)) {
-      //   enqueue(() => sendUpdate({ sessionId: params.sessionId, update: subUpdate }).then(() => {}), true);
-      // }
       await updates;
       // Extensions can change configuration outside the bridge's setter paths.
       // Compare only at settlement, including failed/cancelled turns, not on deltas.
