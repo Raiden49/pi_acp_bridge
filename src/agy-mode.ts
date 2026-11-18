@@ -5,6 +5,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { ndJsonStream, type AnyMessage } from "@agentclientprotocol/sdk";
+import { AgySubagentRuntime } from "./agy-subagent-runtime.js";
+import { asRecord, type JsonRecord, nonBlank, SubagentProtocolTracker } from "./subagents.js";
 
 export interface AgyBridgeOptions {
   clientInput: ReadableStream<Uint8Array>;
@@ -12,14 +14,12 @@ export interface AgyBridgeOptions {
   agentInput: ReadableStream<Uint8Array>;
   agentOutput: WritableStream<Uint8Array>;
   loadSystemPromptAppend?: (cwd: string) => Promise<string>;
+  brainBaseDir?: string;
+  pollIntervalMs?: number;
   trace?: (event: Record<string, string | number | boolean>) => void;
 }
 
 type JsonRpcId = string | number | null;
-type JsonRecord = Record<string, unknown>;
-
-const asRecord = (value: unknown): JsonRecord =>
-  value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 
 export function buildAgySystemPromptAppend(input: {
   agentsFiles: ReadonlyArray<{ path: string; content: string }>;
@@ -63,25 +63,73 @@ export function injectAgySystemPromptMeta(params: JsonRecord, append: string): J
 
 export function startAgyBridge({
   clientInput, clientOutput, agentInput, agentOutput,
-  loadSystemPromptAppend = loadAgySystemPromptAppend, trace = () => {},
+  loadSystemPromptAppend = loadAgySystemPromptAppend,
+  brainBaseDir,
+  pollIntervalMs,
+  trace = () => {},
 }: AgyBridgeOptions) {
   const clientStream = ndJsonStream(clientOutput, clientInput);
   const agentStream = ndJsonStream(agentOutput, agentInput);
   const clientWriter = clientStream.writable.getWriter();
   const agentWriter = agentStream.writable.getWriter();
   const pendingReplays = new Map<JsonRpcId, string>();
+  const pendingPrompts = new Map<JsonRpcId, string>();
+  const subagentTrackers = new Map<string, SubagentProtocolTracker>();
+
+  const getTracker = (sessionId: string): SubagentProtocolTracker => {
+    let tracker = subagentTrackers.get(sessionId);
+    if (!tracker) {
+      tracker = new SubagentProtocolTracker();
+      subagentTrackers.set(sessionId, tracker);
+    }
+    return tracker;
+  };
 
   const sendToClient = (message: AnyMessage) => clientWriter.write(message).catch(() => {});
   const sendToAgent = (message: AnyMessage) => agentWriter.write(message).catch(() => {});
+
+  const isReplayingSession = (sessionId: string): boolean => {
+    for (const activeReplayId of pendingReplays.values()) {
+      if (activeReplayId === sessionId) return true;
+    }
+    return false;
+  };
+
+  const flushSubagentSettlement = async (sessionId: string, cancelled: boolean): Promise<void> => {
+    const tracker = subagentTrackers.get(sessionId);
+    if (!tracker) return;
+    for (const update of tracker.settleTurn(cancelled)) {
+      await sendToClient({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } } as AnyMessage);
+    }
+  };
+
+  const subagentRuntime = new AgySubagentRuntime({
+    brainBaseDir,
+    pollIntervalMs,
+    getTracker,
+    sendToClient,
+  });
 
   const handleClientMessage = async (msg: JsonRecord) => {
     const method = typeof msg.method === "string" ? msg.method : undefined;
     const id = msg.id as JsonRpcId | undefined;
     const params = asRecord(msg.params);
+    const sessionId = nonBlank(params.sessionId);
+
+    if (method === "session/prompt" && id !== undefined && sessionId) {
+      await subagentRuntime.onPromptStart(sessionId, (heldId) => pendingPrompts.delete(heldId));
+      pendingPrompts.set(id, sessionId);
+    } else if (method === "session/cancel" && sessionId) {
+      await flushSubagentSettlement(sessionId, true);
+      await subagentRuntime.onCancel(sessionId, (heldId) => pendingPrompts.delete(heldId));
+    } else if (method === "session/close" && sessionId) {
+      subagentRuntime.onClose(sessionId);
+      subagentTrackers.delete(sessionId);
+    }
 
     if (method === "session/new" || method === "session/load" || method === "session/resume") {
-      if (method !== "session/new" && id !== undefined && typeof params.sessionId === "string") {
-        pendingReplays.set(id, params.sessionId);
+      if (method !== "session/new" && id !== undefined && sessionId) {
+        pendingReplays.set(id, sessionId);
       }
       if (typeof params.cwd === "string" && isAbsolute(params.cwd)) {
         const append = await loadSystemPromptAppend(params.cwd);
@@ -96,14 +144,47 @@ export function startAgyBridge({
 
   const handleAgentMessage = async (msg: JsonRecord) => {
     const id = msg.id as JsonRpcId | undefined;
-    if (id !== undefined && msg.method === undefined) pendingReplays.delete(id);
+    if (id !== undefined && msg.method === undefined) {
+      pendingReplays.delete(id);
+      const promptSessionId = pendingPrompts.get(id);
+      if (promptSessionId !== undefined) {
+        const tracker = subagentTrackers.get(promptSessionId);
+        const result = asRecord(msg.result);
+        const cancelled = "error" in msg || result.stopReason === "cancelled";
+        if (tracker && !cancelled) {
+          const held = await subagentRuntime.maybeHoldPromptTurn(
+            id,
+            promptSessionId,
+            msg,
+            (finishedId) => pendingPrompts.delete(finishedId),
+          );
+          if (held) return;
+        }
+        pendingPrompts.delete(id);
+        await flushSubagentSettlement(promptSessionId, cancelled);
+      }
+    }
 
     if (msg.method === "session/update") {
       const params = asRecord(msg.params), update = asRecord(params.update);
-      const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
-      // agy echoes user_message_chunk during live prompt turns, duplicating user bubbles in Air.
-      if (sessionId && update.sessionUpdate === "user_message_chunk"
-        && ![...pendingReplays.values()].includes(sessionId)) {
+      const sessionId = nonBlank(params.sessionId);
+      if (sessionId) {
+        const replaying = isReplayingSession(sessionId);
+        // agy echoes user_message_chunk during live prompt turns, duplicating user bubbles in Air.
+        if (update.sessionUpdate === "user_message_chunk" && !replaying) {
+          return;
+        }
+        if (!replaying && subagentRuntime.shouldSuppressDuplicateUpdate(sessionId, update)) {
+          return;
+        }
+        const transformed = getTracker(sessionId).transformSessionUpdate(update);
+        for (const item of transformed) {
+          await sendToClient({
+            ...msg,
+            params: { ...params, update: item },
+          } as AnyMessage);
+        }
+        await subagentRuntime.onLiveSessionUpdate(sessionId);
         return;
       }
     }
@@ -142,11 +223,13 @@ export function startAgyBridge({
   const clientLoop = pump(clientReader, handleClientMessage, (id, err) =>
     sendToClient({ jsonrpc: "2.0", id, error: { code: -32603, message: err instanceof Error ? err.message : "Bridge error" } }),
   ).finally(async () => {
+    subagentRuntime.disposeAll();
     await agentWriter.close().catch(() => {});
     await agentOutput.close().catch(() => {});
   });
 
   const agentLoop = pump(agentReader, handleAgentMessage).finally(async () => {
+    subagentRuntime.disposeAll();
     await clientWriter.close().catch(() => {});
     await clientReader.cancel().catch(() => {});
   });
